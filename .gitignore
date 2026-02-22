@@ -1,1 +1,23 @@
-plan.MD
+# Data & secrets
+data/
+.env
+*.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Eval results (regenerable)
+data/eval/results/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Docker
+docker-compose.override.yml
