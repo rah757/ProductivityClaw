@@ -66,7 +66,7 @@ Building the core agent loop end-to-end:
 | **1 — Prove the Loop** | Telegram + Calendar + Briefing + Eval | 🔨 In Progress |
 | 2 — Memory + Actions | Fact extraction, calendar writes, WhatsApp ingestion | Planned |
 | 3 — Intelligence | Proactive suggestions, email/Slack read, vector store | Planned |
-| 4 — Polish | Siri Shortcuts, vision (Qwen-VL), eval dashboard | Planned |
+| 4 — Polish | Siri Shortcuts, vision (Qwen-VL), HomeKit automation, eval dashboard | Planned |
 | 5 — Ecosystem | Skill import pipeline, multi-agent, OSS community | Future |
 
 ## Setup

@@ -546,7 +546,41 @@ calendar with confirmation. It starts feeling like it "knows" you.
   - routine: "I have standup at 9am daily" → {key: daily_standup, value: 9:00 AM}
   - deadline: "Paper due March 15" → {key: paper_deadline, value: 2026-03-15}
   - relationship: "Alex is my team lead" → {key: alex_role, value: team_lead}
+  - job_application: "Applied to Stripe backend" → {subject: stripe_backend, key: status, value: applied}
+  - action_item: "Email John for referral" → {subject: stripe_backend, key: next_step, value: email_john}
+  - appointment: "Booked barber Saturday 2pm" → {subject: barber, key: next_appointment, value: 2026-02-28 14:00}
   - habit: user always approves calendar moves → {key: auto_approve_move, value: true, confidence: 0.8}
+- Any topic gets unlimited attributes via the subject+key model (see 4.3)
+- All data sources feed the same pipeline regardless of source_origin
+
+#### 4.2.1 Extraction Rigor & Validation
+- **Constrained extraction prompt:**
+  - LLM receives the fixed set of allowed `fact_type` values — no freestyling
+  - All existing subjects from DB injected into extraction prompt — forces reuse of
+    `stripe_backend` instead of inventing `stripe_app` or `my_stripe_application`
+  - Required JSON schema with field types enforced
+  - Few-shot examples of correct extractions included in prompt
+  - Examples of correct deduplication (recognizing "Stripe" refers to existing subject)
+- **Validation layer (code, not LLM):**
+  - Extracted JSON must parse as valid JSON
+  - `fact_type`, `subject`, `key`, `value` all required — reject if missing
+  - `fact_type` must be in the allowed set — reject unknown types
+  - Subject fuzzy-matched against existing subjects (Levenshtein distance < 3 → prompt
+    LLM to clarify: "Did you mean 'stripe_backend'?")
+  - Malformed extractions logged for debugging, never inserted
+- **Deduplication logic:**
+  - Match on `subject + key` — if both match, it's an update not an insert
+  - If match found: update value, bump `times_confirmed`, refresh `last_confirmed`
+  - If new subject + key: insert with default confidence (0.7)
+  - If contradicts existing (same subject+key, different value): flag for user confirmation
+    ("You said you prefer mornings but now you said afternoons — which is it?")
+- **Eval (how you know it's working):**
+  - Take 50 conversation samples, manually label expected facts
+  - Compare to actual LLM extractions
+  - Track: false positives (hallucinated facts), false negatives (missed facts),
+    naming drift (same entity called different subjects)
+  - Every extraction bug becomes a test case
+  - Target: >80% precision, >70% recall
 
 #### 4.3 Facts Table
 
@@ -579,6 +613,16 @@ CREATE TABLE facts (
   4. Format into structured text block
   5. Inject into system prompt
 - Context budget: keep memory block under ~2000 tokens to leave room for conversation
+- **Living user profile:** a compressed, periodically-updated summary of everything known
+  about the user — preferences, routines, active projects, key relationships. Always
+  injected into system prompt. Grows richer over time but stays within a fixed token
+  budget (~500 tokens) because it's re-summarized weekly by the LLM.
+  - System prompt structure per call:
+    1. Fixed personality + capabilities (~500 tokens, static)
+    2. Living user profile (~500 tokens, updated weekly)
+    3. Relevant facts for this message (~500 tokens, queried per message)
+    4. Recent conversation turns (~500 tokens)
+    5. The user's new message
 
 #### 4.5 WhatsApp Self-Group Ingestion
 - whatsapp-web.js (Node.js) container added to Docker stack
@@ -742,7 +786,83 @@ where it stops being a chatbot and starts being a productivity agent.
 - Surface existing notes/lists in agent context
 - Read-only: agent can reference but not modify
 
-#### 5.10 iPhone Notification Capture (High-Value Apps)
+#### 5.10 Overnight Anomaly Scan & Fact Hygiene
+- Scheduled job runs nightly (e.g. 3am)
+
+- **Pre-scan database snapshot (mandatory):**
+  - Before ANY edits, copy the SQLite DB file:
+    `cp productivityclaw.db snapshots/pre_scan_YYYYMMDD_HHMMSS.db`
+  - Snapshot stored in `./data/db/snapshots/` with timestamp
+  - Retention: keep last 14 snapshots, delete older ones
+  - If scan fails or produces bad results → restore from snapshot
+  - Snapshot path logged in the scan's action log entry for traceability
+
+- **Step 1 — Detection (deterministic, no LLM):**
+  - **Duplicate candidates:** embed all subject names → cosine similarity scan →
+    flag pairs with similarity > 0.7 as candidates
+  - **Stale facts:** confidence < 0.3 (formula-based, no judgment)
+  - **Orphans:** facts whose source_conversation_id points to deleted
+    or very old conversations
+  - **Naming fragmentation:** subjects that share keywords but differ in format
+    (e.g. `barber_appointment` and `haircut_saturday`)
+
+- **Step 2 — LLM reasoning on candidates (analyst, not editor):**
+  - LLM receives the candidate pairs + all facts for both subjects
+  - LLM explains WHY it thinks they're duplicates (or not):
+    "john_stripe and john_referral are likely the same person — both linked to
+    Stripe, both described as referral contacts"
+  - LLM catches what embeddings miss: `barber_appointment` and `haircut_saturday`
+    are the same topic despite low string similarity
+  - LLM output is a structured proposal with a `reasoning` field — auditable
+  - LLM writes to `scan_proposals` table ONLY. Never touches `facts` table directly.
+
+- **Step 3 — Execution (strict rules, no exceptions):**
+  - **Auto-execute (deterministic only, no LLM involvement):**
+    - Stale fact archival (confidence < 0.3, formula-based — no judgment call)
+    - Snapshot retention cleanup (delete snapshots older than 14 days)
+  - **Propose + require user confirmation:**
+    - Subject merges — ALWAYS. Even when LLM is highly confident.
+    - Telegram message includes the LLM's reasoning:
+      "I think 'john_stripe' and 'john_referral' are the same person because
+      both are linked to Stripe. Merge? [Yes] [No]"
+    - No merge is ever auto-executed. Period.
+  - **Block on conflict (never auto-resolve):**
+    - If two subjects have conflicting values for the same key
+      (e.g. `john_stripe.email = john@a.com` vs `john_referral.email = john@b.com`)
+      → mark as `status='conflict'`, surface to user with both values
+    - Agent does NOT pick one unless:
+      (a) one value is tool-verified (e.g. came from email header, calendar invite), OR
+      (b) user explicitly confirms which is correct
+  - **Never allowed:**
+    - LLM writing directly to the facts table (always goes through scan_proposals)
+    - Deleting facts (only archiving — data is never destroyed)
+    - Editing facts that are tool-verified (source is API, not conversation)
+    - LLM overriding a deterministic threshold (can reason, cannot lower the bar)
+
+- All proposals and actions logged in actions table with action_type='anomaly_scan'
+- Weekly summary includes: "Proposed 3 merges (1 confirmed, 2 pending), archived 12 stale facts"
+
+```sql
+CREATE TABLE scan_proposals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_timestamp DATETIME NOT NULL,
+    snapshot_path TEXT NOT NULL,          -- path to pre-scan DB snapshot
+    proposal_type TEXT NOT NULL,          -- 'merge', 'conflict', 'archive', 'orphan'
+    subject_a TEXT,
+    subject_b TEXT,                       -- NULL for non-merge proposals
+    similarity_score REAL,               -- cosine similarity (merges only)
+    conflicting_key TEXT,                -- key with conflicting values (conflicts only)
+    value_a TEXT,                         -- value from subject_a
+    value_b TEXT,                         -- value from subject_b
+    llm_reasoning TEXT,                  -- LLM's explanation of why this merge/action makes sense
+    status TEXT DEFAULT 'pending',       -- 'pending', 'approved', 'rejected', 'auto_executed'
+    resolved_by TEXT,                    -- 'user', 'auto_deterministic', NULL
+    resolved_at DATETIME,
+    notes TEXT
+);
+```
+
+#### 5.11 iPhone Notification Capture (High-Value Apps)
 - iOS Shortcuts automations for key apps (Slack, Gmail, Canvas)
 - On notification from target app → POST summary to agent webhook
 - Agent receives with source_origin='ios_notification'
@@ -751,7 +871,7 @@ where it stops being a chatbot and starts being a productivity agent.
   for those apps — this is mainly useful for apps without direct API access (Canvas, etc.)
 - Screen Time data (app usage stats) as optional enrichment for weekly summaries
 
-#### 5.10 DeepEval Expansion
+#### 5.12 DeepEval Expansion
 - New metrics:
   - Proactive suggestion engagement: did user act on it? (>60% target)
   - False positive rate: irrelevant notifications (< 20% target)
@@ -769,6 +889,8 @@ where it stops being a chatbot and starts being a productivity agent.
 - [ ] Auto-approval works for frequently-confirmed actions
 - [ ] Proactive suggestion engagement >60%
 - [ ] MCP servers running for Calendar, Gmail, Slack
+- [ ] Overnight anomaly scan merges at least one duplicate correctly
+- [ ] Naming drift measurably reduced after scan feedback loop
 
 ### Phase 3 New Files
 
@@ -790,10 +912,13 @@ agent/
 │   ├── calendar_server.py        # Google Calendar MCP server
 │   ├── gmail_server.py           # Gmail MCP server
 │   └── slack_server.py           # Slack MCP server
-└── scheduler/
-    ├── briefing.py               # updated: includes email/slack
-    ├── proactive_check.py        # periodic proactive notification check
-    └── weekly_summary.py         # weekly productivity summary
+├── scheduler/
+│   ├── briefing.py               # updated: includes email/slack
+│   ├── proactive_check.py        # periodic proactive notification check
+│   ├── anomaly_scan.py           # nightly duplicate detection + fact hygiene
+│   └── weekly_summary.py         # weekly productivity summary
+└── memory/
+    └── user_profile.py           # living user profile re-summarization
 
 docker-compose.yml                # updated: +chromadb container
 ```
@@ -881,6 +1006,25 @@ Documented for strangers.
 - Model quantization tuning: benchmark Q4_K_M vs Q5_K_M vs Q6_K on eval suite
 - Memory pruning: archive old conversations, keep only active facts in hot storage
 
+#### 6.10 Context-Aware Home Automation via HomeKit Shortcuts
+- Agent triggers HomeKit scenes/shortcuts based on schedule + context:
+  - **Smart morning routine:** Briefing time triggers lights on, coffee machine, Focus Mode
+    enabled — adapts to first-meeting time (earlier meeting = earlier routine)
+  - **Focus mode activation:** When calendar shows deep work block or deadline approaching,
+    agent triggers Do Not Disturb + Focus Mode via Shortcuts
+  - **End-of-day transition:** After last meeting, agent triggers wind-down scene
+    (lights dim, summary sent, tomorrow's prep surfaced)
+- Implementation: agent POSTs to iOS Shortcuts HTTP endpoint (same webhook pattern as Siri)
+  - Shortcut receives trigger type → runs HomeKit scene
+  - Shortcuts: "Claw Morning", "Claw Focus", "Claw Wind Down"
+- Triggers are context-driven, not just time-driven:
+  - Morning routine adjusts to actual wake-up signals (first Telegram message, first calendar check)
+  - Focus mode considers calendar density + active deadlines from facts table
+  - End-of-day adapts to actual last meeting, not a fixed time
+- All automations logged in actions table with action_type='homekit_trigger'
+- User can override/disable any automation: "stop triggering focus mode"
+- Throttling: max 1 trigger per scene per hour to prevent spam
+
 ### Phase 4 Exit Criteria
 - [ ] "Hey Siri, ask Claw what I should focus on" → answer in Telegram within 5 seconds
 - [ ] Image sent → structured extraction → stored as memory
@@ -888,6 +1032,9 @@ Documented for strangers.
 - [ ] Eval dashboard shows quality trends in browser
 - [ ] README enables a stranger to set up in 30 minutes
 - [ ] Demo takes under 60 seconds and is impressive
+- [ ] Morning routine triggers automatically based on schedule context
+- [ ] Focus mode activates during deep work blocks
+- [ ] End-of-day transition fires after last meeting
 
 ---
 
