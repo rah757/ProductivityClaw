@@ -14,9 +14,10 @@
 6. Phase 4 — Polish, Multimodal, Interview-Ready
 7. Phase 5 — Open Source Ecosystem
 8. Memory Architecture (Deep Dive)
-9. Eval Strategy (Deep Dive)
-10. Docker & Infrastructure
-11. Key Technical Decisions Log
+9. Caching Strategy (Deep Dive)
+10. Eval Strategy (Deep Dive)
+11. Docker & Infrastructure
+12. Key Technical Decisions Log
 
 ---
 
@@ -535,6 +536,23 @@ calendar with confirmation. It starts feeling like it "knows" you.
   - Medium risk (confirm): create event, move event
   - High risk (always confirm + show details): delete event, cancel multiple events
 
+- **Event ownership tagging:**
+  - Events created by the agent get a custom property: `source: "productivityclaw"`
+    (stored in Google Calendar's extendedProperties field)
+  - Events created by the human (via Apple Calendar, Google Calendar UI, etc.)
+    have NO such tag — they are treated as **human-owned**
+  - **Human-owned events are protected:**
+    - Agent can NEVER delete a human-owned event (tool rejects the call)
+    - Agent can NEVER move a human-owned event without explicit confirmation
+      + a warning: "This event was created by you, not me — are you sure?"
+    - Agent CAN suggest changes to human-owned events but always as proposals
+  - **Agent-owned events are flexible:**
+    - Agent can move/modify its own events with standard confirmation flow
+    - Auto-approval (Phase 3) only applies to agent-owned events
+    - Agent-owned events display "(via Claw)" in the event description
+  - On calendar read, every event is tagged with `ownership: 'human' | 'agent'`
+    before being passed to the LLM — the agent always knows what it can/can't touch
+
 #### 4.2 Fact Extraction Pipeline
 - After each conversation turn, run extraction:
   - Input: conversation text + existing facts
@@ -646,7 +664,42 @@ CREATE TABLE facts (
 - Store comparison results in ./data/eval/comparisons/
 - Purpose: know exactly where local model is weaker, inform Phase 3 routing decisions
 
-#### 4.8 DeepEval Expansion
+#### 4.8 Agent Clarification Questions
+- When context is ambiguous, the agent asks instead of guessing:
+  - "You said 'meet with Alex' — which Alex? Alex from Stripe or Alex your advisor?"
+  - "You mentioned a deadline but no date — when is it due?"
+  - "You dumped 'important meeting next week' — can you be more specific?"
+- Questions tracked in a dedicated table:
+
+```sql
+CREATE TABLE agent_questions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trace_id TEXT NOT NULL,
+    question_text TEXT NOT NULL,
+    context TEXT,                        -- what triggered the question
+    status TEXT DEFAULT 'pending',       -- 'pending', 'resolved', 'rejected'
+    answer_text TEXT,                    -- user's answer (NULL until resolved)
+    answer_trace_id TEXT,                -- conversation where it was answered
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    resolved_at DATETIME,
+    related_subject TEXT,                -- fact subject this relates to
+    FOREIGN KEY (trace_id) REFERENCES conversations(trace_id)
+);
+```
+
+- **Pending questions** re-surfaced in next briefing:
+  "Still need to know: which Alex for next week's meeting?"
+- **Resolved answers** feed directly into fact extraction pipeline
+- **Rejected questions** ("don't worry about it", "stop asking") logged —
+  agent learns what NOT to ask about. Patterns of rejected questions inform
+  prompt tuning (agent is asking too much → adjust threshold).
+- **Eval signal:** if the agent asks too many questions per session, it's not
+  inferring well enough. Track questions-per-conversation as a metric.
+  Target: <2 questions per 10 conversations on average.
+- Agent should prefer inferring from existing facts over asking. Question is
+  the fallback when confidence is low AND the answer materially changes the action.
+
+#### 4.9 DeepEval Expansion
 - New metrics:
   - Faithfulness: is the response grounded in retrieved memory/calendar data?
   - Memory accuracy: are extracted facts correct? (manual review of fact samples)
@@ -708,9 +761,18 @@ where it stops being a chatbot and starts being a productivity agent.
   - Calendar conflict detected? → "Your 2pm and 2:30pm overlap — which takes priority?"
   - Deadline approaching (from facts)? → "Paper deadline is in 3 days — have you started?"
   - Schedule gap? → "You have a 2-hour gap after lunch — good time for deep work"
+  - **Departure alert:** "Leave for office at 7:15 today — traffic is heavy + rain
+    starting at 7:30. ETA 48 min vs your usual 30 min."
+    (combines: calendar first-event time + Distance Matrix ETA + weather)
+  - **Weather alert:** "Freezing rain advisory 4-8pm — your 6pm is across town,
+    consider rescheduling or leaving early"
+  - **Unresolved questions:** "Still need to know: which Alex for next week?"
+    (from agent_questions table, status='pending')
 - Notification throttling: max 5 proactive messages per day (configurable)
 - User can reply "stop" or "too many" → agent reduces frequency
 - Each notification type can be individually toggled
+- **Combined signal notifications are prioritized** — "traffic + weather + meeting"
+  is one high-value message, not three separate pings
 
 #### 5.2 Priority Inference
 - Combines signals to rank what matters:
@@ -743,6 +805,16 @@ where it stops being a chatbot and starts being a productivity agent.
   - Agent still reports: "Moved your meeting (auto-approved based on your history)"
 - Audit trail: auto_approved=TRUE in action log, with reasoning
 - User can revoke: "stop auto-approving calendar moves" → resets to confirmation
+- **Only applies to agent-owned events** (see 4.1 event ownership tagging).
+  Human-owned calendar events always require explicit confirmation regardless of history.
+- **Reliability gate:** auto-approval is disabled system-wide until eval metrics meet
+  thresholds:
+  - Tool call accuracy >90% sustained over 2 weeks
+  - Zero incorrect auto-actions in the last 50 actions
+  - User feedback thumbs-up rate >80%
+  - If any threshold drops, auto-approval pauses and reverts to confirmation mode
+    with a Telegram notice: "Auto-approval paused — accuracy dropped below threshold"
+  - Thresholds tracked automatically via the eval pipeline, no manual check needed
 
 #### 5.6 Weekly Productivity Summary
 - Generated every Sunday evening (or configured day)
@@ -753,7 +825,52 @@ where it stops being a chatbot and starts being a productivity agent.
   - Suggestions: "You had 8 meetings on Wednesday — consider blocking focus time"
 - Stored in conversation log for future reference
 
-#### 5.7 ChromaDB Vector Store
+#### 5.7 Travel Time Predictions
+- **No history ingestion.** Agent never tracks where you've been — no location history,
+  no GPS data, no Google Takeout. Privacy-first.
+- **Forward-looking only:** calendar events have locations → Google Maps Distance Matrix
+  API computes traffic-aware ETAs for upcoming events.
+
+- **Google Maps Distance Matrix API:**
+  - Input: origin (home/office), destination (next event location),
+    departure_time (when you need to leave)
+  - Output: travel time accounting for real-time traffic at that hour
+  - `departure_time` parameter is key — a 2pm commute ≠ a 5pm commute
+  - Free tier: 40K calls/month (more than enough for personal use)
+  - Agent caches frequent routes in facts table to reduce API calls:
+    `{subject: "route_home_to_office", key: "avg_8am", value: "35min"}`
+
+- **How the agent uses this:**
+  - Morning briefing: "Your first meeting is at campus — leave by 8:45 (32 min in
+    current traffic)"
+  - Between-meeting travel: "Your 2pm is downtown and your 3:30 is back on campus —
+    that's 40 min apart. You'll be late unless you leave the 2pm early."
+  - Proactive departure alerts: "Leave for your 2pm in 15 minutes — traffic is
+    heavier than usual"
+
+- **Home/office location:** stored in facts as user preference (one-time setup):
+  `{subject: "user", key: "home_address", value: "..."}`
+  `{subject: "user", key: "office_address", value: "..."}`
+
+#### 5.7.1 Weather Integration
+- **API:** OpenWeatherMap free tier (1,000 calls/day) or WeatherAPI.com free tier
+- Agent checks weather automatically — no user action needed
+- **What the agent does with weather:**
+  - Morning briefing: "High of 42°F, rain starting at 2pm — bring an umbrella"
+  - Combined with travel: "Rain + rush hour — leave 15 min earlier than usual
+    for your 3pm downtown"
+  - Outfit/prep: "Freezing rain tonight — you have a 7pm dinner, consider Uber"
+  - Calendar awareness: "Your outdoor team event tomorrow has a 70% chance of rain —
+    might want a backup plan"
+  - Weekly forecast in Sunday summary: "Rain Mon-Wed, clear Thu-Fri — schedule
+    outdoor plans accordingly"
+  - Severe weather alert → proactive Telegram message regardless of throttle
+- **Weather factors into travel ETA:**
+  - Rain/snow → multiply travel time by 1.2-1.5x (configurable)
+- **Caching:** weather data cached for 30 min (forecast doesn't change faster than that)
+- **Privacy:** only your city/zip is sent to the weather API — no GPS coordinates
+
+#### 5.8 ChromaDB Vector Store
 - New Docker container: chromadb
 - Embedding model: nomic-embed-text via Ollama (lightweight, local)
 - What gets embedded:
@@ -771,7 +888,7 @@ where it stops being a chatbot and starts being a productivity agent.
 - Replaces "load all facts" approach from Phase 2
 - Migration: existing SQLite facts get batch-embedded on first startup
 
-#### 5.8 MCP Migration
+#### 5.9 MCP Migration
 - Refactor Google Calendar from direct SDK to MCP server pattern
 - Why now: stable reference implementation exists, well-tested tool interface
 - Benefits: scoped permissions, standardized tool protocol, easier to add new integrations
@@ -779,14 +896,14 @@ where it stops being a chatbot and starts being a productivity agent.
 - Gmail and Slack also wrapped as MCP servers
 - Foundation for Phase 5 skill ecosystem
 
-#### 5.9 Google Keep Integration
+#### 5.10 Google Keep Integration
 - Google Keep API (unofficial — no official API exists)
 - Alternative: use Google Tasks API (official) if user migrates
 - Or: Apple Notes proper read via Shortcuts export
 - Surface existing notes/lists in agent context
 - Read-only: agent can reference but not modify
 
-#### 5.10 Overnight Anomaly Scan & Fact Hygiene
+#### 5.11 Overnight Anomaly Scan & Fact Hygiene
 - Scheduled job runs nightly (e.g. 3am)
 
 - **Pre-scan database snapshot (mandatory):**
@@ -862,7 +979,7 @@ CREATE TABLE scan_proposals (
 );
 ```
 
-#### 5.11 iPhone Notification Capture (High-Value Apps)
+#### 5.12 iPhone Notification Capture (High-Value Apps)
 - iOS Shortcuts automations for key apps (Slack, Gmail, Canvas)
 - On notification from target app → POST summary to agent webhook
 - Agent receives with source_origin='ios_notification'
@@ -871,7 +988,7 @@ CREATE TABLE scan_proposals (
   for those apps — this is mainly useful for apps without direct API access (Canvas, etc.)
 - Screen Time data (app usage stats) as optional enrichment for weekly summaries
 
-#### 5.12 DeepEval Expansion
+#### 5.13 DeepEval Expansion
 - New metrics:
   - Proactive suggestion engagement: did user act on it? (>60% target)
   - False positive rate: irrelevant notifications (< 20% target)
@@ -1179,7 +1296,111 @@ Embedding model: nomic-embed-text (via Ollama)
 
 ---
 
-## 9. Eval Strategy (Deep Dive)
+## 9. Caching Strategy (Deep Dive)
+
+Agentic chains are expensive: 3-5 LLM calls × 10-15s = 30-75 seconds without caching.
+Three layers of caching bring this down to ~10-20 seconds.
+
+### Layer 1: KV Cache (Ollama Native — Free, Phase 1)
+
+Ollama keeps the model loaded in memory and caches the KV (key-value) attention state.
+If the conversation prefix (system prompt + user context) is the same across calls,
+Ollama reuses the cached computation.
+
+```
+First call:    system prompt + user context → ~1-2s prompt processing
+Follow-up:     same prefix, new message    → ~50-100ms prompt processing
+```
+
+This is huge for ProductivityClaw because the system prompt + living user profile +
+injected facts will be a stable prefix across calls in the same session. The 1-2 second
+prompt processing essentially drops to nothing on follow-ups.
+
+- **Phase 1:** just keep Ollama's model loaded (don't unload between calls). Set
+  `OLLAMA_KEEP_ALIVE` to a long duration. Structure prompts so the stable context
+  (system prompt, user profile) comes first and the variable part (new message) comes last.
+- **Phase 3+:** when user profile and facts change between calls, the prefix changes and
+  KV cache is invalidated. Minimize unnecessary context changes to preserve cache hits.
+- **Cost:** zero — Ollama does this automatically. Just be aware of it when designing prompts.
+
+### Layer 2: Response/Result Caching (SQLite — Phase 2)
+
+Cache LLM outputs for repeated or near-identical queries. Serve cached response instead
+of calling the LLM again.
+
+```sql
+CREATE TABLE response_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query_hash TEXT NOT NULL,            -- SHA-256 of normalized query
+    query_text TEXT NOT NULL,
+    response_text TEXT NOT NULL,
+    context_hash TEXT NOT NULL,          -- hash of the context (calendar state, facts)
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    expires_at DATETIME NOT NULL,        -- TTL-based expiry
+    hit_count INTEGER DEFAULT 0,
+    last_hit DATETIME
+);
+
+CREATE INDEX idx_cache_query ON response_cache(query_hash);
+CREATE INDEX idx_cache_expiry ON response_cache(expires_at);
+```
+
+- **What gets cached:**
+  - "What's on my calendar today?" → cache until calendar changes or EOD
+  - "What should I focus on?" → cache for 30 min (unless new context arrives)
+  - Classification tasks (email categorization, priority scoring) → cache by content hash
+  - Briefing generation → pre-compute at 7:45am, serve cached at 8:00am
+- **Cache invalidation:**
+  - TTL-based: each cache type has a default TTL (calendar: 5 min, briefing: until next day,
+    classification: 1 hour)
+  - Event-based: new calendar event, new context dump, new email → invalidate related caches
+  - `context_hash` ensures stale context doesn't produce stale answers
+- **Performance:** turns a 10-second LLM call into <50ms SQLite lookup
+
+### Layer 3: Semantic Caching (Phase 3 — Requires Vector Store)
+
+Embed incoming queries and check cosine similarity against recent cached queries.
+If similarity > threshold, serve the cached response without calling the LLM.
+
+```
+User: "What should I work on right now?"
+  → Embed query → check against recent cache entries
+  → Match: "What should I focus on?" (similarity: 0.94, cached 12 min ago)
+  → Context hash still valid → serve cached response
+  → Cost: ~100-200ms (embedding + lookup) vs 10-15s (full LLM call)
+```
+
+- Similarity threshold: 0.90 (conservative — would rather re-run the LLM than serve
+  a wrong cached answer)
+- Only applies when `context_hash` matches (same underlying data state)
+- Uses the same ChromaDB instance as memory retrieval (separate collection)
+- Cache collection: `query_cache` with metadata: response, context_hash, timestamp
+
+### Net Effect on Agentic Chains
+
+| Scenario | Without Caching | With Caching |
+|----------|----------------|--------------|
+| Single query | 10-15s | 10-15s (cold) / <50ms (cache hit) |
+| Follow-up in same session | 10-15s | 3-5s (warm KV cache) |
+| Agentic chain (3-5 calls) | 30-75s | ~10-20s (1-2 actual LLM calls + cached) |
+| Repeated daily briefing | 10-15s | <50ms (pre-computed) |
+| "What's on my calendar?" (asked twice in 5 min) | 10-15s × 2 | 10-15s + <50ms |
+
+### Phase Rollout
+
+| Phase | Caching Layer | Build  | Runtime Cost | What You Get |
+|-------|--------------|-----------|-------------|--------------|
+| 1 | KV cache | Zero — Ollama native | Native | Follow-up calls ~50ms instead of ~2s |
+| 2 | Response cache | Small — SQLite table + lookup logic | local SQLite | Repeated queries <50ms, briefing pre-computed |
+| 3 | Semantic cache | Medium — embedding + cosine lookup | local ChromaDB | "Similar enough" queries served from cache |
+
+All three layers are free at runtime (no API costs, everything local). The only cost
+is the engineering time to build layers 2 and 3.
+
+---
+
+## 10. Eval Strategy (Deep Dive)
+
 
 ### Framework: DeepEval
 
@@ -1217,7 +1438,7 @@ Embedding model: nomic-embed-text (via Ollama)
 
 ---
 
-## 10. Docker & Infrastructure
+## 11. Docker & Infrastructure
 
 ### docker-compose.yml Evolution
 
@@ -1288,7 +1509,7 @@ EMBEDDING_MODEL=nomic-embed-text
 
 ---
 
-## 11. Key Technical Decisions Log
+## 12. Key Technical Decisions Log
 
 | Date | Decision | Reasoning | Revisit When |
 |------|----------|-----------|--------------|
