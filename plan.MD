@@ -475,7 +475,12 @@ ProductivityClaw/
 │   ├── core/
 │   │   ├── agent.py              # LangGraph agent definition
 │   │   ├── prompts.py            # system prompts, briefing templates
-│   │   └── tools.py              # tool definitions (calendar, context store)
+│   │   └── tools/
+│   │       ├── __init__.py       # exports ToolRegistry
+│   │       ├── base.py           # BaseTool interface
+│   │       ├── registry.py      # ToolRegistry class
+│   │       ├── calendar_tool.py  # GoogleCalendarTool
+│   │       └── context_tool.py   # ContextStoreTool
 │   │
 │   ├── integrations/
 │   │   ├── google_calendar.py    # Calendar SDK wrapper
@@ -483,6 +488,9 @@ ProductivityClaw/
 │   │
 │   ├── memory/
 │   │   ├── database.py           # SQLite connection, schema init
+│   │   ├── inbox.py              # inbox table CRUD + polling (message queue)
+│   │   ├── outbox.py             # outbox table CRUD + dispatching
+│   │   ├── context_builder.py    # builds LLM context from all memory sources
 │   │   ├── conversation_log.py   # log conversations with trace paths
 │   │   └── action_log.py         # log agent actions + feedback
 │   │
