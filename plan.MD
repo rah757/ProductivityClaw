@@ -1521,6 +1521,7 @@ EMBEDDING_MODEL=nomic-embed-text
 
 | Date | Decision | Reasoning | Revisit When |
 |------|----------|-----------|--------------|
+| Feb 2026 | Qwen 14B or Qwen 3 30B-A3B (MoE) | 14B is proven for tool calling. 30B-A3B activates only 3B params per token — 14B-speed at 30B-knowledge. Benchmark both in Phase 1 eval. | After Phase 1 eval results pick the winner |
 | Feb 2026 | Qwen 14B over GPT-OSS-20B | Better tool calling support, more community validation, lower memory footprint | GPT-OSS-20B has more agentic benchmarks |
 | Feb 2026 | No DeepSeek API | Privacy concern (Chinese servers), contradicts project narrative | DeepSeek offers US-hosted endpoints |
 | Feb 2026 | No vector store Phase 1-2 | Data volume too small, fits in context window | Memory exceeds ~50K tokens |
