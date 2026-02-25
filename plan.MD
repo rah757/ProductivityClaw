@@ -211,7 +211,7 @@ you should focus on.
 
 | Decision | Choice | Reasoning |
 |----------|--------|-----------|
-| LLM (primary) | Qwen 2.5 14B via Ollama | Best local model for tool calling + structured output. M3 Max 36GB handles it at ~12-14GB (Q5_K_M). Free, private, no API cost. |
+| LLM (primary) | Qwen 2.5 14B or Qwen 3 30B-A3B (MoE) via Ollama | Two candidates — 14B dense or 30B MoE. 14B is proven for tool calling at ~12-14GB (Q5_K_M). 30B-A3B is a Mixture-of-Experts model that only activates 3B params per token — so it runs at 14B-like speed and memory (~4-6GB) while having 30B total knowledge. MoE gives better reasoning breadth without the inference cost. Decision: benchmark both in Phase 1 eval and pick the winner. |
 | LLM (benchmark) | Claude Sonnet via API | Benchmark-only — run eval samples through it to measure quality ceiling. Not for production. Costs ~$2-5/month for eval runs. |
 | LLM (vision) | Qwen-VL via Ollama | Phase 4 only. On-demand when user sends images. Screenshots→tasks, whiteboard→notes. |
 | Cloud API for dev? | No — start local | Avoids debugging model quality + agent logic simultaneously. Qwen 14B is competent for structured tool calling. If quality issues arise, swap to cloud temporarily to isolate whether it's model or agent logic. |

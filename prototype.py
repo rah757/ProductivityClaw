@@ -154,7 +154,7 @@ def _fetch_all_calendar_data():
             # Events
             try:
                 t_search = time.time()
-                results = cal.date_search(start=start_date, end=end_date, expand=True)
+                results = cal.search(start=start_date, end=end_date, expand=True)
                 print(f"  [search] {cal.name}: {(time.time() - t_search) * 1000:.0f}ms | {len(results)} events")
                 for event in results:
                     try:
@@ -210,15 +210,14 @@ def fetch_all_events():
 # ─────────────────────────────────────────────
 APPLESCRIPT_REMINDERS = '''
 tell application "Reminders"
+    set allNames to name of every reminder
+    set allCompleted to completed of every reminder
+    set allContainers to name of container of every reminder
     set output to ""
-    repeat with r in (every reminder whose completed is false)
-        set n to name of r
-        set d to ""
-        try
-            set d to due date of r as string
-        end try
-        set l to name of container of r
-        set output to output & n & " | " & d & " | " & l & linefeed
+    repeat with i from 1 to count of allNames
+        if item i of allCompleted is false then
+            set output to output & (item i of allNames) & " | " & (item i of allContainers) & linefeed
+        end if
     end repeat
     return output
 end tell
@@ -243,11 +242,11 @@ def _fetch_reminders_applescript():
             if not line.strip():
                 continue
             parts = [p.strip() for p in line.split(" | ")]
-            if len(parts) >= 3:
+            if len(parts) >= 2:
                 reminders.append({
                     "title": parts[0],
-                    "due": parts[1] if parts[1] else None,
-                    "list": parts[2],
+                    "due": None,
+                    "list": parts[1],
                 })
             elif len(parts) >= 1:
                 reminders.append({"title": parts[0], "due": None, "list": "Unknown"})
