@@ -639,13 +639,18 @@ CREATE TABLE facts (
   4. Format into structured text block
   5. Inject into system prompt
 - Context budget: keep memory block under ~2000 tokens to leave room for conversation
-- **Living user profile:** a compressed, periodically-updated summary of everything known
-  about the user — preferences, routines, active projects, key relationships. Always
-  injected into system prompt. Grows richer over time but stays within a fixed token
-  budget (~500 tokens) because it's re-summarized weekly by the LLM.
+- **Living user profile (`CONTEXT.md`):** a markdown file acting as a compressed summary
+  of everything known about the user — preferences, routines, active projects, and
+  key relationships. Always injected into the system prompt.
+  - **Phase 1:** Manually maintained `CONTEXT.md`. You write it to give the agent baseline
+    knowledge about you without building the extraction pipeline yet.
+  - **Phase 2:** Agent takes ownership. During non-use periods (e.g., overnight cron),
+    the agent reasons deeply over human feedback, recent conversations, and the action log
+    to rewrite and refine `CONTEXT.md`. Grows richer over time but stays within a fixed
+    token budget (~500 tokens).
   - System prompt structure per call:
     1. Fixed personality + capabilities (~500 tokens, static)
-    2. Living user profile (~500 tokens, updated weekly)
+    2. Living user profile (`CONTEXT.md`) (~500 tokens, updated nightly)
     3. Relevant facts for this message (~500 tokens, queried per message)
     4. Recent conversation turns (~500 tokens)
     5. The user's new message
@@ -1331,19 +1336,15 @@ If the conversation prefix (system prompt + user context) is the same across cal
 Ollama reuses the cached computation.
 
 ```
-First call:    system prompt + user context → ~1-2s prompt processing
-Follow-up:     same prefix, new message    → ~50-100ms prompt processing
+First call:    system prompt + CONTEXT.md + user context → ~1-2s prompt processing
+Follow-up:     same prefix + new message                → ~50-100ms prompt processing
 ```
 
-This is huge for ProductivityClaw because the system prompt + living user profile +
-injected facts will be a stable prefix across calls in the same session. The 1-2 second
-prompt processing essentially drops to nothing on follow-ups.
+This is huge for ProductivityClaw because the system prompt + `CONTEXT.md` will be a stable prefix across calls in the same session. The 1-2 second prompt processing essentially drops to nothing on follow-ups.
 
 - **Phase 1:** just keep Ollama's model loaded (don't unload between calls). Set
-  `OLLAMA_KEEP_ALIVE` to a long duration. Structure prompts so the stable context
-  (system prompt, user profile) comes first and the variable part (new message) comes last.
-- **Phase 3+:** when user profile and facts change between calls, the prefix changes and
-  KV cache is invalidated. Minimize unnecessary context changes to preserve cache hits.
+  `OLLAMA_KEEP_ALIVE` to a long duration. Structure prompts so the static context
+  (system prompt, `CONTEXT.md`) comes first and the variable part comes last.
 - **Cost:** zero — Ollama does this automatically. Just be aware of it when designing prompts.
 
 ### Layer 2: Response/Result Caching (SQLite — Phase 2)
@@ -1413,7 +1414,7 @@ User: "What should I work on right now?"
 
 | Phase | Caching Layer | Build  | Runtime Cost | What You Get |
 |-------|--------------|-----------|-------------|--------------|
-| 1 | KV cache | Zero — Ollama native | Native | Follow-up calls ~50ms instead of ~2s |
+| 1 | KV cache | Zero — Ollama native | Free | Follow-up calls ~50ms instead of ~2s |
 | 2 | Response cache | Small — SQLite table + lookup logic | local SQLite | Repeated queries <50ms, briefing pre-computed |
 | 3 | Semantic cache | Medium — embedding + cosine lookup | local ChromaDB | "Similar enough" queries served from cache |
 
