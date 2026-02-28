@@ -306,59 +306,138 @@ Stored in conversation log for full observability and debugging.
 
 ---
 
-## 3. Phase 1 — Prove the Loop
+## 3. Phase 1 — Prove the Loop (Prototype)
 
 ### Goal
-A working Telegram bot that reads your Google Calendar and delivers a useful daily
-briefing. You use it every morning for a week and it's actually helpful.
+A working Telegram bot that natively reads your iCloud Calendar and Reminders instantly, injecting them as context. This serves as the foundational MVP to prove the local LLM can reason about your schedule.
 
-### Timeline: 2-3 weeks
+### Timeline: 1-2 weeks
 
 ### Components
 
 #### 3.1 Docker Stack
-- docker-compose.yml with three services: ollama, agent, db (SQLite via volume)
+- docker-compose.yml with Ollama and Agent
 - Ollama preloaded with Qwen 2.5 14B (Q5_K_M quantization)
 - Shared ./data/ volume for persistence
-- .env file for secrets (Telegram token, Google Calendar credentials)
-- Health checks on all services
 
 #### 3.2 Telegram Bot
 - python-telegram-bot library
 - Webhook mode (not polling) for reliability
 - Message handler: receive text → pass to agent → send response
 - Inline keyboard for thumbs up/down on every agent response
-- Error handling: if agent/LLM is down, respond "I'm restarting, your message is queued"
 
-#### 3.3 Google Calendar Integration
-- google-api-python-client + google-auth
-- OAuth2 flow (one-time setup, token stored locally)
-- READ-ONLY in Phase 1:
-  - get_today_events()
-  - get_tomorrow_events()
-  - get_events_range(start, end)
-  - get_next_event()
-  - search_events(query)
-- Returns structured data (not raw API response) to the agent
+#### 3.3 iCloud Calendar & Reminders Integration
+- **Calendars & Reminders (EventKit):** Native macOS EventKit integration via `pyobjc`. Completely bypasses APIs/CalDAV. Reads directly from the local SQLite-backed EventKit store, fetching events and reminders with virtually zero latency (~20ms).
+- **Three-Layer Sync Strategy:**
+  1. Startup: Full fetch on a background thread so the bot boots instantly.
+  2. Cron: Periodic full sync at 12pm and 12am to stay fresh.
+  3. On-Demand: User can trigger `/sync` to immediately re-fetch.
 
-#### 3.4 LangGraph Agent
+#### 3.4 Direct LLM Integration
+- Basic structured prompt loop (no LangGraph yet)
+- LLM receives System Prompt + Recent Conversation + Exact Calendar Data
+- Fast execution for testing baseline intelligence
+
+#### 3.5 Conversation & Action Logging
+- Every interaction logged to SQLite:
+```sql
+CREATE TABLE conversations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trace_id TEXT NOT NULL,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    source TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    metadata JSON
+);
+```
+- Feedback System:
+  - Every agent response in Telegram gets inline keyboard: [👍] [👎]
+  - Feedback stored in `actions` table
+
+#### 3.6 DeepEval (Phase 1 Scope)
+- Manual test suite: 20-30 test cases covering:
+  - "What's on my calendar today?" → expects correct events
+  - "What's my next meeting?" → expects correct next event
+  - "When am I free tomorrow?" → expects correct gap identification
+- Metrics:
+  - Response factuality: does the answer match actual calendar data?
+  - Latency: end-to-end, LLM inference time
+  - User feedback rate: % of thumbs up vs thumbs down
+
+### Phase 1 Exit Criteria
+- [ ] Docker stack starts with `docker compose up` and Ollama serves Qwen 14B
+- [ ] Can message the Telegram bot and get instant calendar-aware responses
+- [ ] Full conversation log with trace paths in SQLite
+- [ ] Thumbs up/down works and stores feedback
+- [ ] Used daily for 1 week without crashes
+
+### Phase 1 File Structure
+
+```
+ProductivityClaw/
+├── docker-compose.yml
+├── .env
+├── README.md
+├── plan.MD
+│
+├── agent/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── main.py
+│   ├── config.py
+│   │
+│   ├── bot/
+│   │   └── telegram_handler.py
+│   │
+│   ├── core/
+│   │   ├── agent.py
+│   │   └── prompts.py
+│   │
+│   ├── integrations/
+│   │   └── apple_calendar.py
+│   │
+│   ├── memory/
+│   │   ├── database.py
+│   │   ├── context_builder.py
+│   │   ├── conversation_log.py
+│   │   └── action_log.py
+│   │
+│   └── observability/
+│       └── metrics.py
+│
+└── data/
+```
+
+---
+
+## 4. Phase 2 — Memory, Tool Calling + Write Actions
+
+### Goal
+Upgrade to LangGraph tool calling. The agent remembers things about you across conversations, can modify your calendar, and sends proactive morning briefings.
+
+### Timeline: 2-3 weeks (after Phase 1 complete)
+
+### New Components
+
+#### 4.1 LangGraph Agent (Upgraded from 3.4)
 - Single-agent graph with tool-calling loop:
   1. Receive message
-  2. Build context (system prompt + recent conversations + calendar summary)
+  2. Build context
   3. LLM decides: respond directly OR call a tool
   4. If tool call → execute → feed result back to LLM
   5. LLM generates final response
-  6. Log everything
-- Tools registered:
-  - get_calendar_events (with date params)
-  - get_next_event
-  - search_calendar
-  - store_context_dump (save user's random thoughts/tasks)
-  - get_stored_context (retrieve past dumps)
-- System prompt: personality, capabilities, what it can/can't do
-- Retry logic: if LLM fails to generate valid tool call, retry once with clarification
+- Initial Tools:
+  - get_calendar_events, search_calendar
+  - store_context_dump, get_stored_context
 
-#### 3.5 Daily Morning Briefing
+#### 4.2 Context Dump Ingestion
+- User sends random text to the bot: "remind me to email Alex about the project update"
+- Agent classifies: is this a question (answer it) or a dump (store it)?
+- Dumps stored in SQLite with timestamp, raw text, extracted entities (dates, names, actions)
+- Retrieved during briefing generation and when contextually relevant
+
+#### 4.3 Daily Morning Briefing
 - Cron job (APScheduler or system cron) triggers at user-configured time
 - Fetches: today's events, tomorrow's first event, any stored context dumps from yesterday
 - Generates briefing via LLM:
@@ -367,169 +446,6 @@ briefing. You use it every morning for a week and it's actually helpful.
   - Any context you dumped yesterday that's relevant
   - Suggested priority based on event density + deadlines
 - Sends to Telegram as a formatted message
-
-#### 3.6 Context Dump Ingestion
-- User sends random text to the bot: "remind me to email Alex about the project update"
-- Agent classifies: is this a question (answer it) or a dump (store it)?
-- Dumps stored in SQLite with timestamp, raw text, extracted entities (dates, names, actions)
-- Retrieved during briefing generation and when contextually relevant
-
-#### 3.7 Conversation Logging
-- Every interaction logged to SQLite:
-
-```sql
-CREATE TABLE conversations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    trace_id TEXT NOT NULL,           -- UUID grouping related hops
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    source_origin TEXT NOT NULL,      -- 'telegram', 'siri', 'system_cron', 'whatsapp'
-    source_path TEXT NOT NULL,        -- 'telegram→agent', 'siri→http→agent'
-    hop_number INTEGER DEFAULT 1,
-    role TEXT NOT NULL,               -- 'user', 'assistant', 'system', 'tool'
-    content TEXT NOT NULL,
-    metadata JSON,                    -- {intent, entities, tool_calls, model, tokens_used, latency_ms}
-    processing_time_ms INTEGER
-);
-
-CREATE INDEX idx_conversations_trace ON conversations(trace_id);
-CREATE INDEX idx_conversations_timestamp ON conversations(timestamp);
-CREATE INDEX idx_conversations_source ON conversations(source_origin);
-```
-
-#### 3.8 Structured Logging
-- JSON logs to stdout + file (./data/logs/)
-- Every LLM call logged: input prompt (truncated), output, model, tokens, latency
-- Every tool call logged: tool name, params, result, success/failure, duration
-- Every Telegram message: in/out, user feedback, trace_id
-- Log levels: DEBUG (dev), INFO (production), ERROR (failures)
-- Format: one JSON object per line (easy to grep, parse, analyze)
-
-#### 3.9 Feedback System
-- Every agent response in Telegram gets inline keyboard: [👍] [👎]
-- Feedback stored in actions table:
-
-```sql
-CREATE TABLE actions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    trace_id TEXT NOT NULL,
-    action_type TEXT NOT NULL,       -- 'calendar_read', 'briefing', 'context_dump', 'suggestion'
-    description TEXT,
-    tool_calls JSON,                 -- [{tool, params, result, duration_ms}]
-    user_feedback TEXT,              -- 'thumbs_up', 'thumbs_down', NULL
-    feedback_timestamp DATETIME,
-    conversation_id INTEGER,
-    execution_time_ms INTEGER,
-    success BOOLEAN DEFAULT TRUE,
-    error_message TEXT,
-    FOREIGN KEY (conversation_id) REFERENCES conversations(id)
-);
-```
-
-#### 3.10 DeepEval (Phase 1 Scope)
-- Manual test suite: 20-30 test cases covering:
-  - "What's on my calendar today?" → expects correct events
-  - "What's my next meeting?" → expects correct next event
-  - "When am I free tomorrow?" → expects correct gap identification
-  - Context dumps: "remind me to X" → expects storage confirmation
-  - Briefing quality: given a known calendar state, is the briefing accurate?
-- Metrics:
-  - Tool call accuracy: did it call the right function with right params?
-  - Response factuality: does the answer match actual calendar data?
-  - Latency: end-to-end, LLM inference time, tool execution time
-  - User feedback rate: % of thumbs up vs thumbs down
-- Run manually during development, automated nightly once stable
-- Store eval results in ./data/eval/ as JSON for trend tracking
-
-### Phase 1 Exit Criteria
-- [ ] Docker stack starts with `docker compose up` and all services healthy
-- [ ] Can message the Telegram bot and get calendar-aware responses
-- [ ] Morning briefing arrives automatically and is accurate >80% of the time
-- [ ] Can dump context ("remind me to X") and it's stored/retrievable
-- [ ] Full conversation log with trace paths in SQLite
-- [ ] JSON logs capture every LLM call and tool call
-- [ ] Thumbs up/down works and stores feedback
-- [ ] DeepEval test suite passes with >85% tool call accuracy
-- [ ] Used daily for 1 week without crashes
-
-### Phase 1 File Structure
-
-```
-ProductivityClaw/
-├── docker-compose.yml
-├── .env.example
-├── .env                          # gitignored
-├── README.md
-├── PLAN.md                       # this document (gitignored or private)
-│
-├── agent/
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── main.py                   # entry point, starts bot + scheduler
-│   ├── config.py                 # env vars, model config, feature flags
-│   │
-│   ├── bot/
-│   │   ├── telegram_handler.py   # message receive/send, feedback buttons
-│   │   └── webhook.py            # HTTP endpoint (for Siri later)
-│   │
-│   ├── core/
-│   │   ├── agent.py              # LangGraph agent definition
-│   │   ├── prompts.py            # system prompts, briefing templates
-│   │   └── tools/
-│   │       ├── __init__.py       # exports ToolRegistry
-│   │       ├── base.py           # BaseTool interface
-│   │       ├── registry.py      # ToolRegistry class
-│   │       ├── calendar_tool.py  # GoogleCalendarTool
-│   │       └── context_tool.py   # ContextStoreTool
-│   │
-│   ├── integrations/
-│   │   ├── google_calendar.py    # Calendar SDK wrapper
-│   │   └── context_store.py      # SQLite CRUD for context dumps
-│   │
-│   ├── memory/
-│   │   ├── database.py           # SQLite connection, schema init
-│   │   ├── inbox.py              # inbox table CRUD + polling (message queue)
-│   │   ├── outbox.py             # outbox table CRUD + dispatching
-│   │   ├── context_builder.py    # builds LLM context from all memory sources
-│   │   ├── conversation_log.py   # log conversations with trace paths
-│   │   └── action_log.py         # log agent actions + feedback
-│   │
-│   ├── scheduler/
-│   │   └── briefing.py           # morning briefing cron job
-│   │
-│   ├── observability/
-│   │   ├── logger.py             # structured JSON logging
-│   │   └── metrics.py            # latency tracking, counters
-│   │
-│   └── eval/
-│       ├── test_suite.py         # DeepEval test cases
-│       ├── run_eval.py           # evaluate against test suite
-│       └── fixtures/             # mock calendar data for tests
-│
-├── data/                         # Docker volume mount, gitignored
-│   ├── db/
-│   │   └── productivityclaw.db
-│   ├── logs/
-│   │   └── agent.jsonl
-│   └── eval/
-│       └── results/
-│
-└── scripts/
-    ├── setup_calendar_oauth.py   # one-time Google OAuth setup
-    └── seed_test_data.py         # populate test calendar events
-```
-
----
-
-## 4. Phase 2 — Memory + Write Actions
-
-### Goal
-The agent remembers things about you across conversations and can modify your
-calendar with confirmation. It starts feeling like it "knows" you.
-
-### Timeline: 2-3 weeks (after Phase 1 complete)
-
-### New Components
 
 #### 4.1 Calendar Write Operations
 - New tools: create_event, move_event, delete_event
@@ -567,12 +483,15 @@ calendar with confirmation. It starts feeling like it "knows" you.
   - Output: new facts or updates to existing facts
   - Uses the same LLM (Qwen 14B) with a structured extraction prompt
   - Runs asynchronously (doesn't block response)
+- **Temporal Tagging:** Every extracted fact supports optional `valid_from` and `valid_to` timestamps. This allows the agent to construct a **Temporal Knowledge Graph** (a 4D map of your life). 
+  - E.g., `[User] -> [State: High Stress] (valid_to: March 15)`
+  - E.g., `[User] -> [Location: London] (valid_from: April 2, valid_to: April 10)`
 - Extracted fact types:
   - preference: "I prefer morning meetings" → {key: preferred_meeting_time, value: morning}
   - routine: "I have standup at 9am daily" → {key: daily_standup, value: 9:00 AM}
   - deadline: "Paper due March 15" → {key: paper_deadline, value: 2026-03-15}
   - relationship: "Alex is my team lead" → {key: alex_role, value: team_lead}
-  - job_application: "Applied to Stripe backend" → {subject: stripe_backend, key: status, value: applied}
+  - job_application: "Applied to Stripe backend" → {subject: stripe_backend, key: status, value: applied, valid_from: 2026-02-28}
   - action_item: "Email John for referral" → {subject: stripe_backend, key: next_step, value: email_john}
   - appointment: "Booked barber Saturday 2pm" → {subject: barber, key: next_appointment, value: 2026-02-28 14:00}
   - habit: user always approves calendar moves → {key: auto_approve_move, value: true, confidence: 0.8}
@@ -880,8 +799,11 @@ where it stops being a chatbot and starts being a productivity agent.
   `{subject: "user", key: "home_address", value: "..."}`
   `{subject: "user", key: "office_address", value: "..."}`
 
-#### 5.7.1 Weather Integration
-- **API:** OpenWeatherMap free tier (1,000 calls/day) or WeatherAPI.com free tier
+#### 5.7.1 Weather Integration (Open-Meteo)
+- **API:** Open-Meteo API (completely free, no API keys, simple REST call).
+- **Location Strategy:**
+  - **Phase 1/2:** Read `DEFAULT_LAT` and `DEFAULT_LON` (e.g., Home Base) from `.env`. Zero privacy invasion.
+  - **Phase 3+ (Contextual Location):** Instead of relying on strict calendar `location` fields (which are often left blank), the agent relies on its Fact memory. If the user says "I'm in Chicago this weekend" or the calendar title says "Flight to NYC", the agent extracts the location fact and queries weather for that area. Otherwise, it defaults to Home Base.
 - Agent checks weather automatically — no user action needed
 - **What the agent does with weather:**
   - Morning briefing: "High of 42°F, rain starting at 2pm — bring an umbrella"
@@ -896,7 +818,7 @@ where it stops being a chatbot and starts being a productivity agent.
 - **Weather factors into travel ETA:**
   - Rain/snow → multiply travel time by 1.2-1.5x (configurable)
 - **Caching:** weather data cached for 30 min (forecast doesn't change faster than that)
-- **Privacy:** only your city/zip is sent to the weather API — no GPS coordinates
+- **Privacy:** only your `.env` coordinates or agent-inferred city strings are sent out — no GPS tracking.
 
 #### 5.8 ChromaDB Vector Store
 - New Docker container: chromadb
@@ -1537,7 +1459,8 @@ EMBEDDING_MODEL=nomic-embed-text
 
 | Date | Decision | Reasoning | Revisit When |
 |------|----------|-----------|--------------|
-| Feb 2026 | Qwen 14B or Qwen 3 30B-A3B (MoE) | 14B is proven for tool calling. 30B-A3B activates only 3B params per token — 14B-speed at 30B-knowledge. Benchmark both in Phase 1 eval. | After Phase 1 eval results pick the winner |
+| Feb 2026 | Qwen 14B or Qwen 3 30B-A3B (MoE) | 14B is proven for tool calling. 30B-A3B activates only 3B params per token — 14B-speed at 30B-knowledge. Benchmark both in Phase 1 eval. Phase 1: thinking mode OFF (fast responses for calendar/briefing). Phase 2: selective thinking activation for complex tasks (priority ranking, conflict resolution, multi-factor scheduling). | After Phase 1 eval results pick the winner |
+| Feb 2026 | EventKit vs CalDAV | PyObjC EventKit bypasses network latency and APIs entirely (~20ms fetches). We discovered `time.sleep(2)` was required for macOS daemon cache hydration. | No need to revisit, highly optimal |
 | Feb 2026 | Qwen 14B over GPT-OSS-20B | Better tool calling support, more community validation, lower memory footprint | GPT-OSS-20B has more agentic benchmarks |
 | Feb 2026 | No DeepSeek API | Privacy concern (Chinese servers), contradicts project narrative | DeepSeek offers US-hosted endpoints |
 | Feb 2026 | No vector store Phase 1-2 | Data volume too small, fits in context window | Memory exceeds ~50K tokens |
@@ -1559,13 +1482,17 @@ If you're ever stuck on what to work on, follow this order within each phase:
 1. Docker stack boots cleanly
 2. Ollama serves Qwen 14B
 3. Telegram bot sends/receives messages
-4. Google Calendar read works
+4. Native EventKit calendar/reminders read works
 5. Agent connects Telegram → LLM → Calendar → response
 6. Conversation logging works
-7. Daily briefing triggers and sends
-8. Context dump storage works
-9. Feedback buttons work
-10. DeepEval test suite passes
-11. Use it daily for a week
+7. Feedback buttons work
+8. Use it daily for a week to gather baseline metrics
+
+**Phase 2 priority order:**
+1. LangGraph Tool Calling loop
+2. Context dump storage works
+3. Daily briefing triggers and sends
+4. Fact Extraction Pipeline
+5. Calendar Write actions with human confirmation
 
 Each step builds on the previous. Don't skip ahead.

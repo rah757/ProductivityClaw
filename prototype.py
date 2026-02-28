@@ -14,6 +14,8 @@ import time
 import asyncio
 import subprocess
 import threading
+import concurrent.futures
+import EventKit
 from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
@@ -27,8 +29,6 @@ from telegram.ext import (
     ContextTypes,
 )
 import ollama
-import caldav
-import vobject
 
 # ─────────────────────────────────────────────
 # Config
@@ -42,6 +42,9 @@ DB_PATH = os.getenv("DB_PATH", "data/db/claw.db")
 ICLOUD_USERNAME = os.getenv("ICLOUD_USERNAME")
 ICLOUD_APP_PASSWORD = os.getenv("ICLOUD_APP_PASSWORD")
 
+# Global EventKit store (initialized in main() after permissions are granted)
+_event_store = None
+
 SYSTEM_PROMPT = """You are ProductivityClaw, a local-first AI productivity agent.
 You help the user manage their time, tasks, and priorities.
 Be concise and actionable. No fluff.
@@ -49,6 +52,8 @@ Be concise and actionable. No fluff.
 You have access to the user's real calendar data and reminders, which will be provided below.
 When the user asks about their schedule, use the ACTUAL calendar data provided — do not make up events.
 If no calendar data is provided or it's empty, say you don't see any events for that period.
+
+IMPORTANT: You currently have READ-ONLY access to the calendar. You CANNOT add, modify, or delete events. If the user asks you to add an event, politely inform them that you do not have write permissions yet.
 
 If the user dumps context (tasks, reminders, thoughts), acknowledge and confirm storage.
 If the user asks a question, answer directly.
@@ -114,86 +119,68 @@ def get_recent_conversations(db, limit=10):
     return rows
 
 # ─────────────────────────────────────────────
-# iCloud Calendar
+# iCloud Calendar (via Native EventKit)
 # ─────────────────────────────────────────────
 _calendar_cache = {"events": None, "timestamp": 0}
 _reminders_cache = {"reminders": [], "timestamp": 0}
 CACHE_TTL_SECONDS = 300  # 5 minutes
 REMINDERS_REFRESH_INTERVAL = 600  # 10 minutes
 
-def get_caldav_client():
-    """Connect to iCloud CalDAV."""
-    return caldav.DAVClient(
-        url="https://caldav.icloud.com",
-        username=ICLOUD_USERNAME,
-        password=ICLOUD_APP_PASSWORD,
-    )
-
 def _fetch_all_calendar_data():
-    """Single connection: fetch events + reminders together. Caches for 5 min."""
+    """Single connection: fetch events via native macOS EventKit. Caches for 5 min."""
     now = time.time()
     if _calendar_cache["timestamp"] > 0 and (now - _calendar_cache["timestamp"]) < CACHE_TTL_SECONDS:
         age = int(now - _calendar_cache["timestamp"])
         print(f"  [cache hit] ({age}s old)")
         return
 
-    start_date = datetime.now() - timedelta(days=7)
-    end_date = datetime.now() + timedelta(days=14)
-
     try:
-        t_connect = time.time()
-        client = get_caldav_client()
-        principal = client.principal()
-        calendars = principal.calendars()
-        print(f"  [connect] {(time.time() - t_connect) * 1000:.0f}ms | {len(calendars)} calendars")
+        t_start = time.time()
+        
+        start = datetime.now() - timedelta(days=7)
+        end = datetime.now() + timedelta(days=14)
 
+        from Foundation import NSDate
+        ns_start = NSDate.dateWithTimeIntervalSince1970_(start.timestamp())
+        ns_end = NSDate.dateWithTimeIntervalSince1970_(end.timestamp())
+
+        predicate = _event_store.predicateForEventsWithStartDate_endDate_calendars_(ns_start, ns_end, None)
+
+        events = _event_store.eventsMatchingPredicate_(predicate)
+        
         all_events = []
-        all_reminders = []
-
-        for cal in calendars:
-            # Events
+        for e in events:
             try:
-                t_search = time.time()
-                results = cal.search(start=start_date, end=end_date, expand=True)
-                print(f"  [search] {cal.name}: {(time.time() - t_search) * 1000:.0f}ms | {len(results)} events")
-                for event in results:
-                    try:
-                        vcal = vobject.readOne(event.data)
-                        vevent = vcal.vevent
+                dtstart = datetime.fromtimestamp(e.startDate().timeIntervalSince1970())
+                dtend = datetime.fromtimestamp(e.endDate().timeIntervalSince1970()) if e.endDate() else None
+                
+                if e.isAllDay():
+                    time_str = "All day"
+                    date_str = dtstart.strftime("%Y-%m-%d")
+                else:
+                    start_str = dtstart.strftime("%I:%M %p")
+                    end_str = dtend.strftime("%I:%M %p") if dtend else "?"
+                    time_str = f"{start_str} - {end_str}"
+                    date_str = dtstart.strftime("%Y-%m-%d")
 
-                        summary = str(vevent.summary.value) if hasattr(vevent, 'summary') else "No title"
-                        dtstart = vevent.dtstart.value
-                        dtend = vevent.dtend.value if hasattr(vevent, 'dtend') else None
-                        location = str(vevent.location.value) if hasattr(vevent, 'location') else None
-                        description = str(vevent.description.value) if hasattr(vevent, 'description') else None
-
-                        if isinstance(dtstart, datetime):
-                            start_str = dtstart.strftime("%I:%M %p")
-                            end_str = dtend.strftime("%I:%M %p") if dtend else "?"
-                            time_str = f"{start_str} - {end_str}"
-                            date_str = dtstart.strftime("%Y-%m-%d")
-                        else:
-                            time_str = "All day"
-                            date_str = str(dtstart)
-
-                        all_events.append({
-                            "title": summary,
-                            "time": time_str,
-                            "date": date_str,
-                            "calendar": cal.name,
-                            "location": location,
-                            "description": description,
-                        })
-                    except Exception as e:
-                        print(f"  Error parsing event: {e}")
-                        continue
-            except Exception as e:
-                print(f"  Error reading calendar {cal.name}: {e}")
+                all_events.append({
+                    "title": str(e.title()) if e.title() else "No title",
+                    "time": time_str,
+                    "date": date_str,
+                    "calendar": str(e.calendar().title()) if e.calendar() else "Unknown",
+                    "location": str(e.location()) if e.location() else None,
+                    "description": str(e.notes()) if e.notes() else None,
+                })
+            except Exception as ex:
+                print(f"  Error parsing event: {ex}")
                 continue
 
         all_events.sort(key=lambda e: e["date"] + e["time"])
         _calendar_cache["events"] = all_events
         _calendar_cache["timestamp"] = time.time()
+        
+        ms = int((time.time() - t_start) * 1000)
+        print(f"  [calendar] {ms}ms | {len(all_events)} events")
 
     except Exception as e:
         print(f"Calendar error: {e}")
@@ -206,54 +193,34 @@ def fetch_all_events():
     return _calendar_cache["events"] or []
 
 # ─────────────────────────────────────────────
-# Reminders (via AppleScript — local, no CalDAV)
+# Reminders (via Native EventKit)
 # ─────────────────────────────────────────────
-APPLESCRIPT_REMINDERS = '''
-tell application "Reminders"
-    set allNames to name of every reminder
-    set allCompleted to completed of every reminder
-    set allContainers to name of container of every reminder
-    set output to ""
-    repeat with i from 1 to count of allNames
-        if item i of allCompleted is false then
-            set output to output & (item i of allNames) & " | " & (item i of allContainers) & linefeed
-        end if
-    end repeat
-    return output
-end tell
-'''
-
-def _fetch_reminders_applescript():
-    """Fetch reminders via osascript. Updates cache in-place. No timeout — let it run."""
+def _fetch_reminders_eventkit():
+    """Fetch reminders natively via macOS EventKit framework."""
     try:
         t0 = time.time()
-        result = subprocess.run(
-            ["osascript", "-e", APPLESCRIPT_REMINDERS],
-            capture_output=True, text=True,
-        )
-        elapsed = int((time.time() - t0) * 1000)
-
-        if result.returncode != 0:
-            print(f"  [reminders] AppleScript error: {result.stderr.strip()}")
-            return
-
-        reminders = []
-        for line in result.stdout.strip().split("\n"):
-            if not line.strip():
-                continue
-            parts = [p.strip() for p in line.split(" | ")]
-            if len(parts) >= 2:
-                reminders.append({
-                    "title": parts[0],
-                    "due": None,
-                    "list": parts[1],
-                })
-            elif len(parts) >= 1:
-                reminders.append({"title": parts[0], "due": None, "list": "Unknown"})
-
-        _reminders_cache["reminders"] = reminders
+        
+        predicate = _event_store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars_(None, None, None)
+        
+        reminders_list = []
+        fetch_event = threading.Event()
+        
+        def fetch_callback(reminders):
+            if reminders:
+                for r in reminders:
+                    title = r.title()
+                    cal_name = r.calendar().title() if r.calendar() else "Unknown"
+                    reminders_list.append({"title": title, "due": None, "list": cal_name})
+            fetch_event.set()
+            
+        _event_store.fetchRemindersMatchingPredicate_completion_(predicate, fetch_callback)
+        fetch_event.wait(timeout=10)
+        
+        _reminders_cache["reminders"] = reminders_list
         _reminders_cache["timestamp"] = time.time()
-        print(f"  [reminders] {elapsed}ms | {len(reminders)} reminders")
+        
+        elapsed = int((time.time() - t0) * 1000)
+        print(f"  [reminders] {elapsed}ms | {len(reminders_list)} reminders")
 
     except Exception as e:
         print(f"  [reminders] error: {e}")
@@ -264,7 +231,7 @@ def _full_sync():
     t0 = time.time()
     _calendar_cache["timestamp"] = 0  # force calendar re-fetch
     _fetch_all_calendar_data()
-    _fetch_reminders_applescript()
+    _fetch_reminders_eventkit()
     print(f"  [sync] done in {(time.time() - t0) * 1000:.0f}ms | "
           f"{len(_calendar_cache['events'] or [])} events, "
           f"{len(_reminders_cache['reminders'])} reminders")
@@ -497,18 +464,70 @@ def main():
     print(f"Database: {DB_PATH}")
     print(f"iCloud: {ICLOUD_USERNAME}")
 
-    # Test calendar connection on startup
-    try:
-        client = get_caldav_client()
-        principal = client.principal()
-        cals = principal.calendars()
-        print(f"Connected to iCloud — {len(cals)} calendars found: {[c.name for c in cals]}")
-    except Exception as e:
-        print(f"WARNING: Calendar connection failed: {e}")
+    # Create EventKit store fresh (must happen in main, not at module level)
+    global _event_store
+    _event_store = EventKit.EKEventStore.alloc().init()
 
-    # Full sync on startup (background — bot starts immediately)
+    # Request EventKit permissions on startup (block until actually granted)
+    try:
+        status = EventKit.EKEventStore.authorizationStatusForEntityType_(EventKit.EKEntityTypeEvent)
+        print(f"EventKit auth status: {status} (0=NotDetermined, 3=Authorized, 4=FullAccess)")
+
+        events_granted = [False]
+        reminders_granted = [False]
+        events_ready = threading.Event()
+        reminders_ready = threading.Event()
+
+        def on_events_auth(granted, error):
+            events_granted[0] = granted
+            if error:
+                print(f"  EventKit events auth error: {error}")
+            events_ready.set()
+
+        def on_reminders_auth(granted, error):
+            reminders_granted[0] = granted
+            if error:
+                print(f"  EventKit reminders auth error: {error}")
+            reminders_ready.set()
+
+        # Try full access first (macOS 14+), fall back to legacy API
+        if hasattr(_event_store, 'requestFullAccessToEventsWithCompletion_'):
+            _event_store.requestFullAccessToEventsWithCompletion_(on_events_auth)
+            events_ready.wait(timeout=10)
+
+            # If full access denied, try legacy API
+            if not events_granted[0]:
+                print("  Full access denied, trying legacy requestAccessToEntityType...")
+                events_ready.clear()
+                _event_store.requestAccessToEntityType_completion_(
+                    EventKit.EKEntityTypeEvent, on_events_auth,
+                )
+                events_ready.wait(timeout=10)
+        else:
+            _event_store.requestAccessToEntityType_completion_(
+                EventKit.EKEntityTypeEvent, on_events_auth,
+            )
+            events_ready.wait(timeout=10)
+
+        _event_store.requestAccessToEntityType_completion_(
+            EventKit.EKEntityTypeReminder, on_reminders_auth,
+        )
+        reminders_ready.wait(timeout=10)
+
+        print(f"EventKit access — events: {events_granted[0]}, reminders: {reminders_granted[0]}")
+
+        if not events_granted[0]:
+            print("WARNING: Calendar access denied. Grant permission in:")
+            print("  System Settings → Privacy & Security → Calendars → Terminal (Full Access)")
+
+        # Give EventKit time to load data from the system daemon
+        time.sleep(2)
+    except Exception as e:
+        print(f"WARNING: EventKit connection failed: {e}")
+
+    # Initial sync on main thread — ensures events are loaded before bot starts
     print("Starting initial sync...")
-    start_sync()
+    _full_sync()
 
     # Cron sync at 12pm and 12am
     def _cron_sync_loop():

@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  agent:
+    build: 
+      context: .
+      dockerfile: agent/Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      # Note: For EventKit/PyObjC to work natively, this container either needs
+      # full host system access/macOS host execution, or we fallback to CalDAV
+      # if running in a pure Linux Docker container.
+    network_mode: "host"
+    depends_on:
+      - ollama
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ./data/ollama:/root/.ollama
+    ports:
+      - "11434:11434"
