@@ -1,0 +1,7 @@
+python-telegram-bot==21.0.1
+python-dotenv==1.0.1
+ollama==0.4.7
+pyobjc-core==10.1
+pyobjc-framework-EventKit==10.1
+pyobjc-framework-Cocoa==10.1
+requests==2.32.3

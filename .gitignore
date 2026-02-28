@@ -24,3 +24,5 @@ docker-compose.override.yml
 
 # CI workflows (re-add once GitHub PAT has `workflow` scope)
 .github/
+
+.cursor/
