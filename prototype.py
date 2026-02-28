@@ -357,19 +357,23 @@ def build_calendar_context():
 # ─────────────────────────────────────────────
 def chat_with_llm(user_message, recent_context, calendar_context):
     """Send message to Ollama with calendar + conversation context."""
-    full_system = f"""{SYSTEM_PROMPT}
+    # 1. Static system prompt (maximizes KV cache hit rate across turns)
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
---- CURRENT CALENDAR & REMINDERS ---
-{calendar_context}
---- END CALENDAR ---
-
-Current time: {datetime.now().strftime('%A, %B %d, %Y at %I:%M %p')}"""
-
-    messages = [{"role": "system", "content": full_system}]
-
+    # 2. Historical conversation context
     for role, content, ts in recent_context:
         messages.append({"role": role, "content": content})
 
+    # 3. Volatile context injected right before the latest user message
+    # (prevents cache invalidation of the entire history whenever the minute changes)
+    volatile_context = f"""[System context updated for this turn]
+Current time: {datetime.now().strftime('%A, %B %d, %Y at %I:%M %p')}
+
+--- CURRENT CALENDAR & REMINDERS ---
+{calendar_context}
+--- END CALENDAR ---"""
+
+    messages.append({"role": "system", "content": volatile_context})
     messages.append({"role": "user", "content": user_message})
 
     start = datetime.now()
