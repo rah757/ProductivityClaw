@@ -10,16 +10,8 @@ Every productivity tool shows you *what* you have. None of them tell you *what m
 
 ## Architecture
 
-```
-Telegram Bot
-      │
-LangGraph Agent (orchestration + tool calling)
-      │
-├── Google Calendar (read/write with confirmation)
-├── SQLite (conversation log + structured memory)
-├── Qwen 2.5 14B via Ollama (local LLM, fully private)
-└── DeepEval (evaluation + quality tracking)
-```
+<img width="561" height="687" alt="image" src="https://github.com/user-attachments/assets/be3dc207-21d4-43ab-b739-cb9c0a518100" />
+
 
 Everything runs locally in Docker on a single machine. No cloud dependency. Your data never leaves your device.
 
