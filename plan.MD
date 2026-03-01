@@ -2,6 +2,10 @@
 # Internal Reference Document (Not Public)
 # Last Updated: February 2026
 
+**Architecture Highlights (Visuals):**
+- [Agentic Loop Diagram](https://claude.ai/public/artifacts/3b6b6c8d-6226-4626-9be5-28620c94f975)
+- [System Architecture Diagram](https://claude.ai/public/artifacts/ca18fc6b-ac58-4eb0-9fa9-158d503593de)
+
 ---
 
 ## Table of Contents
@@ -422,14 +426,28 @@ Upgrade to LangGraph tool calling. The agent remembers things about you across c
 
 #### 4.1 LangGraph Agent (Upgraded from 3.4)
 - Single-agent graph with tool-calling loop:
-  1. Receive message
-  2. Build context
-  3. LLM decides: respond directly OR call a tool
-  4. If tool call → execute → feed result back to LLM
-  5. LLM generates final response
-- Initial Tools:
-  - get_calendar_events, search_calendar
-  - store_context_dump, get_stored_context
+  1. **Message In:** Receive input (Telegram, Cron, Shortcuts).
+  2. **The Judge/Router Node:** Classifies intent based on the prompt.
+     - *Context Dump* → Route to Fact Staging (async extract & store, bypass main LLM if simple)
+     - *Simple Chat* → Route to Direct LLM (bypass tools)
+     - *Needs Tools* → Route to Agentic Loop
+  3. **Build Context:** Inject `CONTEXT.md`, Facts/Vectors, and Recent Turns.
+  4. **LLM Reasoning (Qwen):** Model decides if it needs a tool or can answer directly.
+  5. **Tool Execution:** 
+     - Execute skill from Registry.
+     - **Success?** Continue.
+     - **Fail?** Retry or fallback.
+     - **Confirm?** Medium/High risk tools pause and wait for user ✅/❌.
+  6. **Feed Result → LLM:** Pass tool output back to the LLM.
+  7. **Send Response:** Output to user.
+  8. **Async Post-Processing:** Log metrics, request 👍/👎, cache response, extract facts to staging.
+- **Skill Architecture (Manifest Pattern):** Tools are no longer flat files. They are modular skills.
+  - `agent/core/skills/[skill_name]/`
+  - `manifest.json`: Defines the tool name, description, required parameters, and whether it requires thinking mode. (The `ToolRegistry` reads these dynamically to build the LLM's toolbelt).
+  - `execute.py`: The actual Python execution code.
+- Initial Skills:
+  - calendar (get_events, search)
+  - memory (store_context_dump, get_stored_context)
 
 #### 4.2 Context Dump Ingestion
 - User sends random text to the bot: "remind me to email Alex about the project update"
@@ -437,7 +455,14 @@ Upgrade to LangGraph tool calling. The agent remembers things about you across c
 - Dumps stored in SQLite with timestamp, raw text, extracted entities (dates, names, actions)
 - Retrieved during briefing generation and when contextually relevant
 
-#### 4.3 Daily Morning Briefing
+#### 4.3 Information Staging (The Holding Pen)
+- A layer between raw chat and permanent Memory/Priorities.
+- If the agent infers a major change during chat (e.g., "I'm focusing entirely on Docker right now" or "I hate morning meetings"), it does **not** silently overwrite your permanent profile.
+- Instead, it extracts the insight and places it into a `staging_area` table.
+- **Human Review:** During the Morning Briefing or Weekly Priority Sync, the agent presents these staged items: *"I noticed a few things recently. Should I update your profile with these? 1. You prefer afternoon meetings. 2. Your main focus is Docker."*
+- User approves or rejects them, preventing the "black box AI" problem where the bot silently changes its behavior without you knowing.
+
+#### 4.4 Daily Morning Briefing
 - Cron job (APScheduler or system cron) triggers at user-configured time
 - Fetches: today's events, tomorrow's first event, any stored context dumps from yesterday
 - Generates briefing via LLM:
@@ -447,7 +472,18 @@ Upgrade to LangGraph tool calling. The agent remembers things about you across c
   - Suggested priority based on event density + deadlines
 - Sends to Telegram as a formatted message
 
-#### 4.1 Calendar Write Operations
+#### 4.5 Periodic Priority Setting Cron
+- A scheduled cron (e.g., weekly on Sunday evenings) that prompts the user to review and set goals.
+- **Workflow:**
+  1. Agent surfaces current known priorities from the Fact database.
+  2. Agent suggests *new* priorities based on recent context dumps, meetings, and deadlines.
+  3. Telegram message: "It's time for our weekly priority sync. Here is what I have as your top goals for next week: [List]. Do you want to add, remove, or modify any of these?"
+  4. User responds: "Remove X, add Y."
+  5. Agent updates the Fact database with the new priority list.
+- Priorities can also be updated fluidly through natural chat at any time ("Hey, make learning Docker my top priority this week").
+- These priorities are then injected into `CONTEXT.md` / system prompt to guide daily task suggestions.
+
+#### 4.6 Calendar Write Operations
 - New tools: create_event, move_event, delete_event
 - Human-in-the-loop confirmation flow:
   1. User: "move my 3pm to tomorrow same time"
@@ -477,7 +513,7 @@ Upgrade to LangGraph tool calling. The agent remembers things about you across c
   - On calendar read, every event is tagged with `ownership: 'human' | 'agent'`
     before being passed to the LLM — the agent always knows what it can/can't touch
 
-#### 4.2 Fact Extraction Pipeline
+#### 4.7 Fact Extraction Pipeline
 - After each conversation turn, run extraction:
   - Input: conversation text + existing facts
   - Output: new facts or updates to existing facts
@@ -498,7 +534,7 @@ Upgrade to LangGraph tool calling. The agent remembers things about you across c
 - Any topic gets unlimited attributes via the subject+key model (see 4.3)
 - All data sources feed the same pipeline regardless of source_origin
 
-#### 4.2.1 Extraction Rigor & Validation
+#### 4.7.1 Extraction Rigor & Validation
 - **Constrained extraction prompt:**
   - LLM receives the fixed set of allowed `fact_type` values — no freestyling
   - All existing subjects from DB injected into extraction prompt — forces reuse of
@@ -527,7 +563,7 @@ Upgrade to LangGraph tool calling. The agent remembers things about you across c
   - Every extraction bug becomes a test case
   - Target: >80% precision, >70% recall
 
-#### 4.3 Facts Table
+#### 4.8 Facts Table
 
 ```sql
 CREATE TABLE facts (
@@ -550,7 +586,7 @@ CREATE TABLE facts (
 -- Facts confirmed multiple times get higher base confidence
 ```
 
-#### 4.4 Memory Context Injection
+#### 4.9 Memory Context Injection
 - Before every LLM call, build context block:
   1. Query active facts (confidence > 0.5)
   2. Get recent actions (last 10)
@@ -574,7 +610,7 @@ CREATE TABLE facts (
     4. Recent conversation turns (~500 tokens)
     5. The user's new message
 
-#### 4.5 WhatsApp Self-Group Ingestion
+#### 4.10 WhatsApp Self-Group Ingestion
 - whatsapp-web.js (Node.js) container added to Docker stack
 - Connects to your WhatsApp Web session
 - Monitors your 3 self-groups only (configured by group name/ID)
@@ -583,20 +619,20 @@ CREATE TABLE facts (
 - Store in same conversation log + facts pipeline
 - Read-only: never sends messages TO WhatsApp
 
-#### 4.6 Apple Notes Capture
+#### 4.11 Apple Notes Capture
 - iOS Shortcut: "Share to Claw"
   - Share sheet → Get text → HTTP POST to agent webhook (port 8080)
   - Agent receives with source_origin='apple_notes_share'
 - Not a full sync — just on-demand sharing of specific notes
 
-#### 4.7 Claude Sonnet Benchmarking
+#### 4.12 Claude Sonnet Benchmarking
 - Add optional Claude API integration (gated behind feature flag)
 - Run eval test suite through both Qwen 14B and Claude Sonnet
 - Compare: tool call accuracy, factuality, response quality
 - Store comparison results in ./data/eval/comparisons/
 - Purpose: know exactly where local model is weaker, inform Phase 3 routing decisions
 
-#### 4.8 Agent Clarification Questions
+#### 4.13 Agent Clarification Questions
 - When context is ambiguous, the agent asks instead of guessing:
   - "You said 'meet with Alex' — which Alex? Alex from Stripe or Alex your advisor?"
   - "You mentioned a deadline but no date — when is it due?"
@@ -631,7 +667,7 @@ CREATE TABLE agent_questions (
 - Agent should prefer inferring from existing facts over asking. Question is
   the fallback when confidence is low AND the answer materially changes the action.
 
-#### 4.9 Thinking Mode Activation (MoE Models)
+#### 4.14 Thinking Mode Activation (MoE Models)
 - Phase 1 runs with thinking OFF — all responses are fast, no internal deliberation
 - Phase 2 introduces selective thinking for tasks that benefit from deeper reasoning:
   - **No-think (default):** calendar queries, briefings, context dumps, simple Q&A
@@ -646,7 +682,7 @@ CREATE TABLE agent_questions (
   doesn't improve tool accuracy or factuality by >10%, keep it off for that task type.
 - All thinking decisions logged: {thinking_enabled: true/false, task_type, latency_ms}
 
-#### 4.10 DeepEval Expansion
+#### 4.15 DeepEval Expansion
 - New metrics:
   - Faithfulness: is the response grounded in retrieved memory/calendar data?
   - Memory accuracy: are extracted facts correct? (manual review of fact samples)

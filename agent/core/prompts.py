@@ -1,4 +1,6 @@
-SYSTEM_PROMPT = """You are ProductivityClaw, a local-first AI productivity agent.
+import os
+
+BASE_PROMPT = """You are ProductivityClaw, a local-first AI productivity agent.
 You help the user manage their time, tasks, and priorities.
 Be concise and actionable. No fluff.
 
@@ -11,3 +13,14 @@ IMPORTANT: You currently have READ-ONLY access to the calendar. You CANNOT add, 
 If the user dumps context (tasks, reminders, thoughts), acknowledge and confirm storage.
 If the user asks a question, answer directly.
 Always reference specific event names, times, and calendars when discussing the schedule."""
+
+def get_system_prompt():
+    """Reads CONTEXT.md and appends it to the BASE_PROMPT."""
+    context_path = os.path.join(os.path.dirname(__file__), "CONTEXT.md")
+    
+    user_context = ""
+    if os.path.exists(context_path):
+        with open(context_path, "r", encoding="utf-8") as f:
+            user_context = f.read()
+
+    return f"{BASE_PROMPT}\n\n--- LIVING USER PROFILE ---\n{user_context}\n---------------------------"

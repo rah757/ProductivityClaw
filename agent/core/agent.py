@@ -1,12 +1,12 @@
 import ollama
 from datetime import datetime
 from agent.config import OLLAMA_MODEL
-from agent.core.prompts import SYSTEM_PROMPT
+from agent.core.prompts import get_system_prompt
 
 def chat_with_llm(user_message, recent_context, calendar_context):
     """Send message to Ollama with calendar + conversation context."""
     # 1. Static system prompt (maximizes KV cache hit rate across turns)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages = [{"role": "system", "content": get_system_prompt()}]
 
     # 2. Historical conversation context
     for role, content, ts in recent_context:
