@@ -432,12 +432,12 @@ Upgrade to LangGraph tool calling. The agent remembers things about you across c
      - *Simple Chat* → Route to Direct LLM (bypass tools)
      - *Needs Tools* → Route to Agentic Loop
   3. **Build Context:** Inject `CONTEXT.md`, Facts/Vectors, and Recent Turns.
-  4. **LLM Reasoning (Qwen):** Model decides if it needs a tool or can answer directly.
+  4. **LLM Reasoning (Qwen via ReAct):** Model uses a ReAct (Reason + Act) loop. It generates a *Thought* about what to do, chooses an *Action* (tool), receives the *Observation* (tool result), and repeats until it can answer.
   5. **Tool Execution:** 
      - Execute skill from Registry.
      - **Success?** Continue.
      - **Fail?** Retry or fallback.
-     - **Confirm?** Medium/High risk tools pause and wait for user ✅/❌.
+     - **Confirm?** Medium/High risk tools pause execution via LangGraph **SQLite-backed Checkpointing** (state suspension). The graph sleeps until the user clicks ✅/❌, then resumes exactly where it left off.
   6. **Feed Result → LLM:** Pass tool output back to the LLM.
   7. **Send Response:** Output to user.
   8. **Async Post-Processing:** Log metrics, request 👍/👎, cache response, extract facts to staging.

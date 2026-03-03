@@ -5,3 +5,6 @@ pyobjc-core==10.1
 pyobjc-framework-EventKit==10.1
 pyobjc-framework-Cocoa==10.1
 requests==2.32.3
+langchain-core==0.3.35
+langchain-ollama==0.2.3
+langgraph==0.2.70
