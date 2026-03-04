@@ -1,0 +1,14 @@
+{
+  "name": "get_calendar_events",
+  "description": "Fetch the user's schedule (events and reminders) for a specific timeframe. Use this when the user asks about their day, schedule, or availability.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "timeframe": {
+        "type": "string",
+        "description": "The timeframe to fetch. Allowed values: 'today', 'tomorrow', 'this_week', 'recent'."
+      }
+    },
+    "required": ["timeframe"]
+  }
+}
