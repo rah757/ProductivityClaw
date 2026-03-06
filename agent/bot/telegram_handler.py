@@ -29,22 +29,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.chat.send_action("typing")
 
-    # Fetch calendar
+    # Fetch calendar context to inject into LangGraph prompt
     try:
         t_cal = time.time()
         calendar_context = build_calendar_context()
         cal_ms = int((time.time() - t_cal) * 1000)
-        print(f"  [{trace_id}] [calendar total] {cal_ms}ms")
     except Exception as e:
         calendar_context = f"Calendar unavailable: {e}"
         cal_ms = 0
         print(f"Calendar fetch error: {e}")
 
+    print(f"  [{trace_id}] Received message, routing to LangGraph...")
+
     # Get LLM response
     try:
-        response_text, latency_ms = chat_with_llm(user_text, recent, calendar_context)
+        from agent.core.graph_agent import chat_with_llm as graph_chat
+        response_text, latency_ms = graph_chat(user_text, recent, calendar_context)
     except Exception as e:
-        response_text = f"Error talking to LLM: {e}"
+        import traceback
+        traceback.print_exc()
+        response_text = f"Error talking to LangGraph: {e}"
         latency_ms = 0
 
     log_message(trace_id, "telegram", "assistant", response_text, {

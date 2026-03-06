@@ -75,6 +75,39 @@ def build_agent():
     
     return workflow.compile()
 
+def chat_with_llm(user_message: str, recent_context: list, calendar_context: str = ""):
+    """Entry point for telegram_handler to talk to the LangGraph agent."""
+    graph = build_agent()
+    
+    sys_content = get_system_prompt()
+    sys_content += f"\n\nCurrent time: {datetime.now().strftime('%A, %B %d, %Y at %I:%M %p')}"
+    if calendar_context:
+        sys_content += f"\n\n--- CALENDAR DATA (use this if the user asked about schedule) ---\n{calendar_context}\n---"
+    
+    messages = [SystemMessage(content=sys_content)]
+    
+    for msg in recent_context:
+        # Expected tuple format from SQLite fetchall: (role, content, timestamp)
+        # However, let's handle dicts or tuples
+        role = msg["role"] if isinstance(msg, dict) else msg[0]
+        content = msg["content"] if isinstance(msg, dict) else msg[1]
+        
+        if role == "user":
+            messages.append(HumanMessage(content=content))
+        else:
+            # For assistant messages we ideally use AIMessage, but a standard tool-less one
+            from langchain_core.messages import AIMessage
+            messages.append(AIMessage(content=content))
+            
+    messages.append(HumanMessage(content=user_message))
+    
+    start_time = datetime.now()
+    result = graph.invoke({"messages": messages})
+    latency_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+    
+    final_message = result["messages"][-1].content
+    return final_message, latency_ms
+
 def test_chat(graph, user_message: str):
     """Run a test message through the graph."""
     print(f"\nUser: {user_message}")

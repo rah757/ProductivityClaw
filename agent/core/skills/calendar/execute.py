@@ -69,6 +69,15 @@ def execute(timeframe: str) -> str:
         else:
             sections.append("RECENT: No events")
 
+    elif timeframe == "all":
+        if all_events:
+            lines = ["ALL EVENTS (past 7 days + next 14 days):"]
+            for e in all_events:
+                lines.append(f"  - {e['date']} {e['time']} | {e['title']} [{e['calendar']}]")
+            sections.append("\n".join(lines))
+        else:
+            sections.append("ALL EVENTS: No calendar events")
+
     # Always append reminders
     if reminders:
         lines = ["REMINDERS:"]

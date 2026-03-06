@@ -26,3 +26,6 @@ docker-compose.override.yml
 .github/
 
 .cursor/
+
+# Claude worktrees
+.claude/worktrees/
