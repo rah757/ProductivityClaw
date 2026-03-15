@@ -1,0 +1,30 @@
+{
+  "name": "move_event",
+  "description": "Propose moving an existing calendar event to a new date and/or time. The user will confirm before any change is made. Use when the user wants to reschedule or move an event.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "event_title": {
+        "type": "string",
+        "description": "Title of the event to move (case-insensitive match)."
+      },
+      "current_date": {
+        "type": "string",
+        "description": "Current date of the event in YYYY-MM-DD format."
+      },
+      "new_date": {
+        "type": "string",
+        "description": "New date for the event in YYYY-MM-DD format."
+      },
+      "new_start_time": {
+        "type": "string",
+        "description": "New start time in HH:MM (24-hour) format."
+      },
+      "new_end_time": {
+        "type": "string",
+        "description": "New end time in HH:MM (24-hour) format."
+      }
+    },
+    "required": ["event_title", "current_date", "new_date", "new_start_time", "new_end_time"]
+  }
+}

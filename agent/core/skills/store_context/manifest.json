@@ -1,0 +1,14 @@
+{
+  "name": "store_context",
+  "description": "Save something the user shared for future reference. Call this when the user gives you information, tasks, reminders, preferences, goals, or anything they want remembered across conversations.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "text": {
+        "type": "string",
+        "description": "The content to save verbatim."
+      }
+    },
+    "required": ["text"]
+  }
+}

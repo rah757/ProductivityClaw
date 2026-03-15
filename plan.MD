@@ -472,19 +472,16 @@ Upgrade to LangGraph tool calling. The agent remembers things about you across c
   - Suggested priority based on event density + deadlines
 - Sends to Telegram as a formatted message
 
-#### 4.5 Periodic Priority Setting Cron
-- A scheduled cron (e.g., weekly on Sunday evenings) that prompts the user to review and set goals.
-- **Workflow:**
-  1. Agent surfaces current known priorities from the Fact database.
-  2. Agent suggests *new* priorities based on recent context dumps, meetings, and deadlines.
-  3. Telegram message: "It's time for our weekly priority sync. Here is what I have as your top goals for next week: [List]. Do you want to add, remove, or modify any of these?"
-  4. User responds: "Remove X, add Y."
-  5. Agent updates the Fact database with the new priority list.
-- Priorities can also be updated fluidly through natural chat at any time ("Hey, make learning Docker my top priority this week").
-- These priorities are then injected into `CONTEXT.md` / system prompt to guide daily task suggestions.
-
-#### 4.6 Calendar Write Operations
+#### 4.1 Calendar Write Operations
+- Implemented via **native macOS EventKit (PyObjC)** -- same integration already used for reads.
+  No Google Calendar API, no OAuth, no API keys required. Writes go through EventKit and Apple's
+  sync layer handles propagation to iCloud/Google/Exchange automatically.
 - New tools: create_event, move_event, delete_event
+- Key EventKit write methods:
+  - `EKEvent.eventWithEventStore_(_event_store)` → create new event object
+  - `_event_store.saveEvent_span_commit_error_(event, span, True, None)` → save/update
+  - `_event_store.removeEvent_span_commit_error_(event, span, True, None)` → delete
+  - `span` parameter for recurring events: `EKSpanThisEvent` | `EKSpanFutureEvents`
 - Human-in-the-loop confirmation flow:
   1. User: "move my 3pm to tomorrow same time"
   2. Agent generates action plan: "Move 'Team Sync' from today 3pm to tomorrow 3pm"
@@ -497,10 +494,11 @@ Upgrade to LangGraph tool calling. The agent remembers things about you across c
   - High risk (always confirm + show details): delete event, cancel multiple events
 
 - **Event ownership tagging:**
-  - Events created by the agent get a custom property: `source: "productivityclaw"`
-    (stored in Google Calendar's extendedProperties field)
+  - Events created by the agent get "(via Claw)" appended to the event title or notes field
+    (EventKit has no custom metadata fields -- ownership is tracked in SQLite:
+    `agent_created_events` table keyed by `event_external_id` from `EKEvent.eventIdentifier`)
   - Events created by the human (via Apple Calendar, Google Calendar UI, etc.)
-    have NO such tag — they are treated as **human-owned**
+    have NO such entry — they are treated as **human-owned**
   - **Human-owned events are protected:**
     - Agent can NEVER delete a human-owned event (tool rejects the call)
     - Agent can NEVER move a human-owned event without explicit confirmation
@@ -509,8 +507,8 @@ Upgrade to LangGraph tool calling. The agent remembers things about you across c
   - **Agent-owned events are flexible:**
     - Agent can move/modify its own events with standard confirmation flow
     - Auto-approval (Phase 3) only applies to agent-owned events
-    - Agent-owned events display "(via Claw)" in the event description
-  - On calendar read, every event is tagged with `ownership: 'human' | 'agent'`
+  - On calendar read, every event's `eventIdentifier` is checked against the
+    `agent_created_events` table — tagged `ownership: 'human' | 'agent'`
     before being passed to the LLM — the agent always knows what it can/can't touch
 
 #### 4.7 Fact Extraction Pipeline
@@ -563,7 +561,25 @@ Upgrade to LangGraph tool calling. The agent remembers things about you across c
   - Every extraction bug becomes a test case
   - Target: >80% precision, >70% recall
 
-#### 4.8 Facts Table
+#### 4.2.5 Agent-Created Events Table
+
+```sql
+CREATE TABLE agent_created_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_identifier TEXT NOT NULL UNIQUE,  -- EKEvent.eventIdentifier from EventKit
+    title TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_by_trace_id TEXT,               -- which conversation triggered the creation
+    FOREIGN KEY (created_by_trace_id) REFERENCES conversations(trace_id)
+);
+```
+
+- Populated whenever the agent calls `saveEvent` via EventKit
+- Checked on every calendar read to tag `ownership: 'human' | 'agent'`
+- If an agent-created event is deleted externally (user deleted it in Calendar.app),
+  the row stays in this table — orphaned rows are harmless
+
+#### 4.3 Facts Table
 
 ```sql
 CREATE TABLE facts (
@@ -710,7 +726,7 @@ agent/
 ├── core/
 │   └── confirmation.py            # human-in-the-loop confirmation flow
 ├── integrations/
-│   ├── google_calendar.py         # updated: write operations added
+│   ├── apple_calendar.py          # updated: write operations added (create/move/delete via EventKit)
 │   └── apple_notes_webhook.py     # receive share sheet POSTs
 ├── memory/
 │   ├── facts.py                   # fact extraction + storage + decay
@@ -1532,3 +1548,100 @@ If you're ever stuck on what to work on, follow this order within each phase:
 5. Calendar Write actions with human confirmation
 
 Each step builds on the previous. Don't skip ahead.
+
+---
+
+## 13. Blind 75 / DSA Integration
+
+### Overview
+ProductivityClaw tracks DSA (Blind 75) grinding alongside everything else.
+Same SQLite DB, same Telegram bot, no separate infra. DSA progress is just
+another data source — facts, briefings, calendar events, and proactive
+reminders all naturally include it.
+
+### The Table (add to existing DB)
+
+```sql
+CREATE TABLE dsa_progress (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    problem TEXT NOT NULL,              -- 'two_sum', 'has_duplicate'
+    category TEXT NOT NULL,             -- 'arrays_hashing', 'two_pointers', etc.
+    pattern TEXT,                       -- 'check_then_store', 'freq_map', etc.
+    attempt_number INTEGER DEFAULT 1,
+    performance TEXT,                   -- 'nailed', 'struggled', 'bombed'
+    time_minutes INTEGER,               -- rough time for the session
+    weaknesses TEXT,                    -- comma-separated gap notes
+    notes TEXT,                         -- freeform: what clicked, what didn't
+    next_review DATE,
+    interval_days INTEGER,              -- current spaced repetition interval
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_dsa_review ON dsa_progress(problem, next_review);
+```
+
+### Spaced Repetition Intervals
+- **nailed** (< 5 min, no hints): 7 days → 14 → 30 → graduated
+- **struggled** (hints needed): 3 days → 7 → 14 → 30
+- **bombed** (heavy guidance): 1 day → 3 → 7 → 14 → 30
+- Each review: nail it → advance interval. Struggle → reset one level back.
+
+### Telegram Commands to Add
+- `/review` — show problems due today (WHERE next_review <= date('now'))
+- `/dsa` — show all active problems + next review dates
+- `/weakness` — show pattern weakness summary
+
+### Integration Points by Phase
+
+**Phase 1 (now — cheap add-on):**
+- Add `dsa_progress` table to existing DB
+- Add `/review` and `/dsa` Telegram commands
+- I (Claude in Cowork) log attempt data after each problem session
+- Replaces the current markdown files (notes.md, schedule.md, shortcomings.md)
+  as the source of truth once table exists
+
+**Phase 2 (when briefing is built):**
+- Morning briefing includes: "DSA review due today: Two Sum"
+- Uses same briefing generator — just another SQL query for due reviews
+- Pattern weakness summary added to weekly briefing on Sundays
+
+**Phase 2 (when calendar write lands):**
+- Auto-create calendar events: "Review: Two Sum" at next_review date
+- Existing human-in-the-loop confirmation flow handles it
+- After review, agent moves event to next interval date
+
+**Phase 3 (MCP migration):**
+- Wrap dsa_progress table as `neetcode_server.py` MCP server
+- Tools: get_review_queue, log_attempt, get_weaknesses, suggest_next_problem
+- Any MCP client (Cowork, Claude Code, Telegram bot) can query DSA progress
+
+### Pattern Weakness Tracking
+Track by PATTERN not just by problem. A problem is a solved checkbox.
+A pattern is a skill you either have or don't.
+
+Patterns to track: set_uniqueness, freq_map, check_then_store,
+two_pointers, sliding_window, binary_search, stack_based, dfs_bfs, dp_basic,
+dp_advanced, heap, trie, graph_traversal
+
+Query to get weakness summary:
+```sql
+SELECT pattern,
+       COUNT(*) as times_seen,
+       SUM(CASE WHEN performance IN ('struggled','bombed') THEN 1 ELSE 0 END) as times_struggled,
+       ROUND(AVG(CASE WHEN performance = 'nailed' THEN 1.0 ELSE 0.0 END), 2) as confidence
+FROM dsa_progress
+WHERE pattern IS NOT NULL
+GROUP BY pattern
+ORDER BY confidence ASC;
+```
+
+### Current Progress (as of Mar 9, 2026)
+| Problem | Category | Pattern | Performance | Next Review |
+|---------|----------|---------|-------------|-------------|
+| has_duplicate | arrays_hashing | set_uniqueness | easy | Mar 15 |
+| is_anagram | arrays_hashing | freq_map | easy (.get() re-learned) | Mar 15 |
+| two_sum | arrays_hashing | check_then_store | struggled | Mar 11 |
+
+### Key Weakness (current)
+- **check_then_store hashmap** — doesn't intuit hashmap for lookup without prompting
+- **complexity analysis** — can identify O(n²) when walked through, not yet automatic

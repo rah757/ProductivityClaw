@@ -1,0 +1,34 @@
+{
+  "name": "create_event",
+  "description": "Propose creating a new calendar event. The user will be asked to confirm before anything is written. Use when the user wants to schedule, add, or create an event or meeting.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "title": {
+        "type": "string",
+        "description": "Event title."
+      },
+      "date": {
+        "type": "string",
+        "description": "Date in YYYY-MM-DD format."
+      },
+      "start_time": {
+        "type": "string",
+        "description": "Start time in HH:MM (24-hour) format."
+      },
+      "end_time": {
+        "type": "string",
+        "description": "End time in HH:MM (24-hour) format."
+      },
+      "calendar": {
+        "type": "string",
+        "description": "Calendar name to add to. Optional -- defaults to the default calendar."
+      },
+      "location": {
+        "type": "string",
+        "description": "Optional location for the event."
+      }
+    },
+    "required": ["title", "date", "start_time", "end_time"]
+  }
+}
