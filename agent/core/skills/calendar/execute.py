@@ -10,6 +10,9 @@ def execute(timeframe: str) -> str:
     now = datetime.now()
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
+    # Normalize: "this week" → "this_week", strip whitespace
+    timeframe = timeframe.strip().lower().replace(" ", "_")
+
     # Note: EventKit fetches must have been warmed up by main.py in real usage,
     # but for testing, this will trigger a synchronous fetch.
     all_events = fetch_all_events()
@@ -46,16 +49,20 @@ def execute(timeframe: str) -> str:
             sections.append("TOMORROW: No events")
 
     elif timeframe == "this_week":
-        day_after_str = (today_start + timedelta(days=2)).strftime("%Y-%m-%d")
-        week_end_str = (today_start + timedelta(days=7)).strftime("%Y-%m-%d")
-        events = filter_events(all_events, day_after_str, week_end_str)
+        today_str = today_start.strftime("%Y-%m-%d")
+        # End of week = next Sunday (or 7 days out, whichever is more)
+        days_until_sunday = 6 - now.weekday()  # weekday(): Mon=0, Sun=6
+        if days_until_sunday <= 0:
+            days_until_sunday = 7  # if today is Sunday, show next 7 days
+        week_end_str = (today_start + timedelta(days=max(days_until_sunday + 1, 7))).strftime("%Y-%m-%d")
+        events = filter_events(all_events, today_str, week_end_str)
         if events:
-            lines = ["LATER THIS WEEK:"]
+            lines = ["THIS WEEK:"]
             for e in events:
                 lines.append(f"  - {e['date']} {e['time']} | {e['title']} [{e['calendar']}]")
             sections.append("\n".join(lines))
         else:
-            sections.append("LATER THIS WEEK: No events")
+            sections.append("THIS WEEK: No events")
 
     elif timeframe == "recent":
         past_week_str = (today_start - timedelta(days=7)).strftime("%Y-%m-%d")

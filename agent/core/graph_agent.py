@@ -2,17 +2,18 @@ import importlib
 import importlib.util
 import os
 import sys
+import time
 from datetime import datetime
 from typing import Annotated, Optional, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from langchain_ollama import ChatOllama
-
-from agent.config import OLLAMA_MODEL
+from langchain_openai import ChatOpenAI
+from agent.config import MLX_MODEL, MLX_BASE_URL
 from agent.core.prompts import get_system_prompt
 from agent.core.registry import load_skills
+from agent.memory.context_store import search_context_dumps
 from agent.integrations.apple_calendar import fetch_all_events, request_permissions
 
 
@@ -67,12 +68,19 @@ def build_agent(
     if trace_id:
         _inject_trace_id(trace_id)
 
-    llm = ChatOllama(model=OLLAMA_MODEL, temperature=0.1)
+    llm = ChatOpenAI(
+        base_url=MLX_BASE_URL,
+        api_key="not-needed",
+        model=MLX_MODEL,
+        temperature=0.1,
+    )
 
-    # Bind only the tools the router selected
+    # Bind tools: None = all tools, [] = no tools, [...] = specific subset
     all_tools = load_skills()
     if tool_names is None:
         selected = all_tools
+    elif len(tool_names) == 0:
+        selected = []
     else:
         tool_map = {t.name: t for t in all_tools}
         selected = [tool_map[n] for n in tool_names if n in tool_map]
@@ -84,13 +92,29 @@ def build_agent(
 
     def call_model(state: State):
         print("  [graph] -> node: agent (thinking...)")
+        t0 = time.perf_counter()
         response = llm.invoke(state["messages"])
-        # Strip <think>...</think> tags from Qwen 3 reasoning output
+        ms = int((time.perf_counter() - t0) * 1000)
+
+        # MLX/OpenAI may return content as list of dicts instead of string
+        if isinstance(response.content, list):
+            text_parts = [
+                c["text"] if isinstance(c, dict) and "text" in c else str(c)
+                for c in response.content
+            ]
+            response.content = "".join(text_parts)
+
+        # Strip <think> tags if model leaks them
         if response.content and "<think>" in response.content:
             import re
             response.content = re.sub(
                 r"<think>.*?</think>", "", response.content, flags=re.DOTALL
             ).strip()
+
+        reasoning = response.additional_kwargs.get("reasoning_content", "")
+        r_len = len(reasoning) if reasoning else 0
+        c_len = len(response.content) if response.content else 0
+        print(f"  [graph]    llm call: {ms}ms (reasoning: {r_len} chars, content: {c_len} chars)")
         return {"messages": [response]}
 
     def call_tools(state: State):
@@ -104,6 +128,7 @@ def build_agent(
             tool_args = tool_call["args"]
             print(f"  [graph] -> node: tools (executing {tool_name} with {tool_args})")
 
+            t0 = time.perf_counter()
             if tool_name in tools_dict:
                 try:
                     result = tools_dict[tool_name].invoke(tool_args)
@@ -111,6 +136,8 @@ def build_agent(
                     result = f"Error: {str(e)}"
             else:
                 result = f"Tool {tool_name} not found."
+            tool_ms = int((time.perf_counter() - t0) * 1000)
+            print(f"  [graph]    tool {tool_name}: {tool_ms}ms")
 
             result_str = str(result)
 
@@ -140,6 +167,14 @@ def build_agent(
         return update
 
     def should_continue(state: State):
+        # Safety cap: prevent infinite tool-call loops (max 10 iterations)
+        tool_call_count = sum(
+            1 for m in state["messages"]
+            if hasattr(m, "tool_calls") and m.tool_calls
+        )
+        if tool_call_count >= 10:
+            print("  [graph] WARNING: hit 10-iteration cap, forcing END")
+            return END
         if state["messages"][-1].tool_calls:
             return "tools"
         return END
@@ -171,8 +206,10 @@ def chat_with_llm(
     """
     from agent.core.intent_router import classify
 
+    t0 = time.perf_counter()
     intent = classify(user_message)
-    print(f"  [router] intent={intent}")
+    router_ms = int((time.perf_counter() - t0) * 1000)
+    print(f"  [router] intent={intent} ({router_ms}ms)")
 
     graph = build_agent(
         trace_id=trace_id,
@@ -182,6 +219,17 @@ def chat_with_llm(
 
     sys_content = get_system_prompt()
     sys_content += f"\n\nCurrent time: {datetime.now().strftime('%A, %B %d, %Y at %I:%M %p')}"
+
+    # Inject relevant stored memories via FTS5 search
+    t0 = time.perf_counter()
+    memories = search_context_dumps(user_message, limit=3)
+    fts_ms = int((time.perf_counter() - t0) * 1000)
+    if memories:
+        sys_content += "\n\n--- THINGS THE USER PREVIOUSLY TOLD YOU (use these to answer) ---"
+        for m in memories:
+            sys_content += f"\n- {m['content']} ({m['created_at']})"
+        sys_content += "\n--- END MEMORIES ---"
+    print(f"  [fts5] {len(memories)} memories ({fts_ms}ms)")
 
     messages = [SystemMessage(content=sys_content)]
     for msg in recent_context:
@@ -195,9 +243,17 @@ def chat_with_llm(
 
     start_time = datetime.now()
     result = graph.invoke({"messages": messages, "pending_action_id": None})
+
+    final_message = result["messages"][-1].content or ""
+
+    # Retry once if LLM returned empty (e.g. after tool call it forgot to respond)
+    if not final_message.strip():
+        print("  [graph] WARNING: empty response, retrying...")
+        result = graph.invoke({"messages": result["messages"], "pending_action_id": result.get("pending_action_id")})
+        final_message = result["messages"][-1].content or ""
+
     latency_ms = int((datetime.now() - start_time).total_seconds() * 1000)
 
-    final_message = result["messages"][-1].content
     # Final safety strip for any remaining <think> tags
     if final_message and "<think>" in final_message:
         import re

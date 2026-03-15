@@ -1,0 +1,24 @@
+{
+  "name": "update_profile",
+  "description": "Update the user's living profile (CONTEXT.md) when they share or change core facts about themselves: recurring schedules, preferences, work hours, routines, or corrections to previously stored info. Use this instead of store_context when the info is a permanent/semi-permanent fact, not a one-off note.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["add", "remove", "update"],
+        "description": "What to do: 'add' a new fact, 'remove' an outdated fact, or 'update' an existing fact."
+      },
+      "section": {
+        "type": "string",
+        "enum": ["Preferences", "Schedule", "Routines", "Work"],
+        "description": "Which section of the profile to modify. 'Schedule' for recurring meetings/standups. 'Routines' for habits like gym, meal prep. 'Preferences' for settings and preferences. 'Work' for job/team info."
+      },
+      "content": {
+        "type": "string",
+        "description": "The line to add/update. For 'remove', the text to search for and delete."
+      }
+    },
+    "required": ["action", "section", "content"]
+  }
+}

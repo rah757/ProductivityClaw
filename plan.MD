@@ -1277,24 +1277,92 @@ Thresholds:
   < 0.3: marked inactive, excluded from context
 ```
 
-### Phase 3 Vector Store Integration
+### Phase 2.5: FTS5 Full-Text Search (Current — Implemented)
+
+Context dumps are now searchable via SQLite FTS5 (full-text search).
 
 ```
-User message → embed
+User message → split into words → join with OR
                  ↓
-         ChromaDB semantic search (top-K)
+         context_dumps_fts (FTS5 virtual table, BM25 ranking)
                  ↓
-         Retrieved chunks + SQLite facts
+         Top 3 matching memories
                  ↓
-         Context builder merges both
-                 ↓
-         Injected into LLM system prompt
+         Injected into system prompt as "--- RELEVANT MEMORIES ---"
 ```
+
+**How it works:**
+- FTS5 builds an inverted index (word → row IDs) behind the scenes
+- Queries use BM25 ranking (same algorithm Google started with)
+- Words are auto-joined with OR so partial matches are returned
+- Microsecond search, zero dependencies (FTS5 is built into SQLite)
+
+**What FTS5 handles well:**
+- "dentist" matches dump containing "My dentist is Dr. Patel"
+- "calendar work" matches dump containing "Use Claw calendar for work stuff"
+- Any query where the user uses words that are actually in the stored context
+
+**Known limitations (acceptable for now):**
+- No semantic matching: "am I free tomorrow?" won't match "I prefer morning meetings"
+- No stemming by default: "running" won't match "run" (can add tokenizer later)
+- Multi-word phrases are OR-joined, not proximity-ranked
+
+**When to upgrade:** When context_dumps exceeds ~50 entries and FTS5 starts returning
+too many irrelevant matches, or when semantic misses become noticeable in daily use.
+
+### Context Dump Lifecycle & Relevance Decay
+
+Not all stored context ages the same way. Two categories:
+
+| Type | Example | Lifespan |
+|------|---------|----------|
+| **Permanent facts** | "My dentist is Dr. Patel" | Never expires |
+| **Temporal context** | "Project deadline is March 20" | Expires after the date |
+| **Action-gated** | "Remember to email John about the proposal" | Expires once done |
+
+**Current approach:** All dumps persist forever. No expiry.
+
+**Planned approach (Phase 3):**
+1. **Time-based decay** — FTS5 rank is already used for relevance. We can add a
+   recency multiplier: `final_score = bm25_rank * recency_weight` where recency_weight
+   decays over weeks. Older dumps rank lower but aren't deleted.
+2. **Action-gated expiry** — When the user says "forget that" or "done with that",
+   add a `delete_context` skill that marks dumps as inactive (soft delete).
+3. **Auto-archive** — Dumps older than 90 days with no FTS5 hits get moved to an
+   archive table, excluded from search but not deleted.
+
+### Phase 3 Vector Store Integration (Future — sqlite-vec)
+
+**Why sqlite-vec over ChromaDB:**
+- Stays in the same SQLite database (no separate process)
+- Zero new infrastructure, just an extension
+- Hybrid search: FTS5 for keyword hits + sqlite-vec for semantic fallback
+
+```
+User message → embed via nomic-embed-text (Ollama)
+                 ↓
+         sqlite-vec cosine similarity search (top-K)
+                 ↓
+         Merge with FTS5 keyword results (hybrid ranking)
+                 ↓
+         Top 3 deduplicated matches
+                 ↓
+         Injected into system prompt
+```
+
+**Hybrid search strategy:**
+1. Run FTS5 keyword search (microseconds, high precision)
+2. Run sqlite-vec semantic search (100-500ms, high recall)
+3. Merge results: FTS5 matches get priority, sqlite-vec fills gaps
+4. Deduplicate and take top 3
 
 Embedding model: nomic-embed-text (via Ollama)
 - 768-dimensional embeddings
 - Runs locally, ~500MB memory
 - Fast: <50ms per embedding on M3 Max
+
+**When to add:** When FTS5 alone starts missing relevant context in daily use.
+Trigger: user says "didn't you remember X?" and the dump exists but wasn't surfaced.
 
 ---
 

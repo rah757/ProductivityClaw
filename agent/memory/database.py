@@ -65,8 +65,23 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_dsa_problem_next_review
             ON dsa_progress (problem, next_review);
+
+        -- FTS5 full-text search index over context_dumps
+        CREATE VIRTUAL TABLE IF NOT EXISTS context_dumps_fts
+        USING fts5(content, trace_id UNINDEXED, created_at UNINDEXED);
     """)
     db.commit()
+
+    # Migration: backfill FTS5 index from existing context_dumps
+    fts_count = db.execute("SELECT COUNT(*) FROM context_dumps_fts").fetchone()[0]
+    real_count = db.execute("SELECT COUNT(*) FROM context_dumps").fetchone()[0]
+    if real_count > 0 and fts_count == 0:
+        db.execute(
+            "INSERT INTO context_dumps_fts (content, trace_id, created_at) "
+            "SELECT content, trace_id, created_at FROM context_dumps"
+        )
+        db.commit()
+        print(f"  [db] backfilled {real_count} rows into context_dumps_fts")
 
     # Migration: drop old context_dumps if it uses the legacy schema (raw_text column)
     cols = {row[1] for row in db.execute("PRAGMA table_info(context_dumps)").fetchall()}

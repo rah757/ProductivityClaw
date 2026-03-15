@@ -5,9 +5,10 @@ from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.error import Conflict
-from agent.config import TELEGRAM_TOKEN, ALLOWED_USERS, OLLAMA_MODEL, DB_PATH
+from agent.config import TELEGRAM_TOKEN, ALLOWED_USERS, MLX_MODEL, DB_PATH
 from agent.bot.telegram_handler import handle_message, handle_feedback, handle_sync, handle_noop, handle_write_confirm
 from agent.integrations.apple_calendar import request_permissions, full_sync
+from agent.scheduler.briefing import start_heartbeat, set_send_fn
 
 def _cron_sync_loop():
     while True:
@@ -31,7 +32,7 @@ def main():
         return
 
     print(f"Starting ProductivityClaw prototype...")
-    print(f"Model: {OLLAMA_MODEL}")
+    print(f"Model: {MLX_MODEL}")
     print(f"Allowed users: {ALLOWED_USERS}")
     print(f"Database: {DB_PATH}")
 
@@ -61,6 +62,17 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_feedback, pattern=r"^feedback:"))
     app.add_handler(CallbackQueryHandler(handle_write_confirm, pattern=r"^writeconfirm:"))
     app.add_handler(CallbackQueryHandler(handle_noop, pattern=r"^noop$"))
+
+    # Start heartbeat — proactive agent that wakes up and messages user if needed
+    async def _heartbeat_send(text: str):
+        """Send a heartbeat message to the first allowed user."""
+        bot = app.bot
+        for user_id in ALLOWED_USERS:
+            await bot.send_message(chat_id=user_id, text=f"🫀 {text}")
+            break  # just send to the first allowed user
+
+    set_send_fn(_heartbeat_send)
+    start_heartbeat()
 
     print("Bot is running. Send a message on Telegram.")
     print("  (If you see 'Conflict: terminated by other getUpdates', stop any other bot instance—only one can poll at a time.)")

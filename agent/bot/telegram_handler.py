@@ -1,12 +1,26 @@
 import json
+import re
 import uuid
 import time
 import asyncio
 import threading
+from html import escape as html_escape
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from agent.config import ALLOWED_USERS, OLLAMA_MODEL
+from agent.config import ALLOWED_USERS, MLX_MODEL
+
+
+def _md_to_tg_html(text: str) -> str:
+    """Convert LLM markdown to Telegram-safe HTML."""
+    text = html_escape(text)
+    # **bold** → <b>bold</b>
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    # *italic* → <i>italic</i> (but not inside bold tags)
+    text = re.sub(r'\*(.+?)\*', r'<i>\1</i>', text)
+    # `code` → <code>code</code>
+    text = re.sub(r'`(.+?)`', r'<code>\1</code>', text)
+    return text
 from agent.memory.conversation_log import log_message, get_recent_conversations
 from agent.memory.action_log import log_action, update_feedback
 from agent.memory.pending_actions import get_pending_action, resolve_pending_action
@@ -46,13 +60,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # the LLM sees "I created X" and copies the pattern instead of calling tools.
     if not pending_action_id:
         log_message(trace_id, "telegram", "assistant", response_text, {
-            "model": OLLAMA_MODEL,
+            "model": MLX_MODEL,
             "latency_ms": latency_ms,
         })
 
     log_action(trace_id, "chat_response", {
         "latency_ms": latency_ms,
-        "model": OLLAMA_MODEL,
+        "model": MLX_MODEL,
     })
 
     if pending_action_id:
@@ -61,14 +75,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("✅ Confirm", callback_data=f"writeconfirm:{pending_action_id}:approve"),
             InlineKeyboardButton("❌ Cancel",  callback_data=f"writeconfirm:{pending_action_id}:cancel"),
         ]])
-        body = f"{response_text}\n\n_{action['description']}_" if action else response_text
-        await update.message.reply_text(body, reply_markup=keyboard, parse_mode="Markdown")
+        desc_html = html_escape(action['description']) if action else ""
+        body = f"{_md_to_tg_html(response_text)}\n\n<i>{desc_html}</i>" if action else _md_to_tg_html(response_text)
+        await update.message.reply_text(body or "Done.", reply_markup=keyboard, parse_mode="HTML")
     else:
         feedback_keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("👍", callback_data=f"feedback:up:{trace_id}"),
             InlineKeyboardButton("👎", callback_data=f"feedback:down:{trace_id}"),
         ]])
-        await update.message.reply_text(response_text, reply_markup=feedback_keyboard)
+        await update.message.reply_text(_md_to_tg_html(response_text) or "Done.", reply_markup=feedback_keyboard, parse_mode="HTML")
 
     print(f"[{trace_id}] llm:{latency_ms}ms | User: {user_text[:50]} | Agent: {response_text[:50]}")
 
@@ -86,7 +101,10 @@ async def handle_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton(f"{'👍' if feedback == 'up' else '👎'} Recorded", callback_data="noop")]
     ])
-    await query.edit_message_reply_markup(reply_markup=keyboard)
+    try:
+        await query.edit_message_reply_markup(reply_markup=keyboard)
+    except Exception:
+        pass  # already edited (double-tap)
     print(f"  [{trace_id}] Feedback: {feedback}")
 
 

@@ -1,10 +1,10 @@
 python-telegram-bot==21.0.1
 python-dotenv==1.0.1
-ollama==0.4.7
 pyobjc-core==10.1
 pyobjc-framework-EventKit==10.1
 pyobjc-framework-Cocoa==10.1
 requests==2.32.3
 langchain-core==0.3.35
-langchain-ollama==0.2.3
+langchain-openai>=0.3.0
 langgraph==0.2.70
+mlx-lm>=0.22.0
