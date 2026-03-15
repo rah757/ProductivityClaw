@@ -167,7 +167,8 @@ class TestPromptAssembly:
         from agent.core.prompts import get_system_prompt
         prompt = get_system_prompt()
         assert "ProductivityClaw" in prompt
-        assert "READ-ONLY" in prompt
+        assert "Tools" in prompt          # general tool-use section exists
+        assert "READ-ONLY" not in prompt  # write restrictions removed -- tools handle this
 
     def test_system_prompt_includes_user_profile_section(self):
         from agent.core.prompts import get_system_prompt
@@ -270,6 +271,41 @@ class TestScheduleQueries:
         response, _ = _ask_agent("What's happening this week?")
         missing = _response_mentions(response, ["Database Systems Midterm"])
         assert not missing, f"Response missing this-week event: {missing}"
+
+
+@pytest.mark.llm
+class TestToolCallEnforcement:
+    """Ensure schedule queries execute the calendar tool (agentic behavior)."""
+
+    @pytestmark_llm
+    def test_schedule_query_executes_get_calendar_events(self):
+        # Patch source module before build_agent/load_skills so tool execute.py binds mock data.
+        with patch("agent.integrations.apple_calendar.fetch_all_events", return_value=get_mock_events()), \
+             patch("agent.integrations.apple_calendar.fetch_all_reminders", return_value=get_mock_reminders()):
+            from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+            from agent.core.prompts import get_system_prompt
+            from agent.core.graph_agent import build_agent
+
+            graph = build_agent()
+            sys_content = get_system_prompt()
+            sys_content += f"\n\nCurrent time: {datetime.now().strftime('%A, %B %d, %Y at %I:%M %p')}"
+
+            result = graph.invoke({
+                "messages": [
+                    SystemMessage(content=sys_content),
+                    HumanMessage(content="What's on my schedule today?"),
+                ]
+            })
+
+            tool_messages = [
+                m for m in result["messages"]
+                if isinstance(m, ToolMessage) and getattr(m, "name", "") == "get_calendar_events"
+            ]
+
+            assert tool_messages, (
+                "Expected get_calendar_events tool execution for schedule query, "
+                "but no calendar tool call occurred."
+            )
 
 
 @pytest.mark.llm

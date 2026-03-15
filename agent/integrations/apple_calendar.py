@@ -119,6 +119,133 @@ def fetch_all_reminders():
         _fetch_reminders_eventkit()
     return _reminders_cache["reminders"]
 
+# ---------------------------------------------------------------------------
+# Write operations
+# ---------------------------------------------------------------------------
+
+def _parse_ns_date(date_str: str, time_str: str):
+    """Parse YYYY-MM-DD + time string into an NSDate.
+
+    Accepts both 24-hour (HH:MM) and 12-hour (H:MM AM/PM) formats so
+    the function is robust to whatever the LLM happens to produce.
+    """
+    from Foundation import NSDate
+    time_str = time_str.strip()
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %I:%M %p", "%Y-%m-%d %I:%M%p"):
+        try:
+            dt = datetime.strptime(f"{date_str} {time_str}", fmt)
+            return NSDate.dateWithTimeIntervalSince1970_(dt.timestamp())
+        except ValueError:
+            continue
+    raise ValueError(
+        f"Cannot parse time '{time_str}' -- expected HH:MM (24h) or H:MM AM/PM"
+    )
+
+
+def find_event_identifier(title: str, date_str: str) -> str | None:
+    """Search the live EventKit store for an event matching title + date.
+
+    Returns EKEvent.eventIdentifier() or None if not found.
+    Case-insensitive title match.
+    """
+    try:
+        from Foundation import NSDate
+        day_start = datetime.strptime(date_str, "%Y-%m-%d")
+        day_end   = day_start + timedelta(days=1)
+        ns_start  = NSDate.dateWithTimeIntervalSince1970_(day_start.timestamp())
+        ns_end    = NSDate.dateWithTimeIntervalSince1970_(day_end.timestamp())
+        predicate = _event_store.predicateForEventsWithStartDate_endDate_calendars_(
+            ns_start, ns_end, None
+        )
+        events = _event_store.eventsMatchingPredicate_(predicate)
+        for e in events:
+            if e.title() and e.title().lower() == title.lower():
+                return str(e.eventIdentifier())
+        return None
+    except Exception as ex:
+        print(f"  [find_event_identifier] error: {ex}")
+        return None
+
+
+def create_event(
+    title: str,
+    date_str: str,
+    start_time: str,
+    end_time: str,
+    calendar_name: str | None = None,
+    location: str | None = None,
+) -> str:
+    """Create a new event via EventKit. Returns event_identifier.
+
+    Args:
+        date_str:   YYYY-MM-DD
+        start_time: HH:MM (24h)
+        end_time:   HH:MM (24h)
+    """
+    event = EventKit.EKEvent.eventWithEventStore_(_event_store)
+    event.setTitle_(title)
+    event.setStartDate_(_parse_ns_date(date_str, start_time))
+    event.setEndDate_(_parse_ns_date(date_str, end_time))
+
+    if location:
+        event.setLocation_(location)
+
+    # Pick calendar by name or fall back to default
+    cal = None
+    if calendar_name:
+        for c in _event_store.calendarsForEntityType_(EventKit.EKEntityTypeEvent):
+            if str(c.title()).lower() == calendar_name.lower():
+                cal = c
+                break
+    if cal is None:
+        cal = _event_store.defaultCalendarForNewEvents()
+    event.setCalendar_(cal)
+
+    error_ptr = None
+    success = _event_store.saveEvent_span_commit_error_(
+        event, EventKit.EKSpanThisEvent, True, error_ptr
+    )
+    if not success:
+        raise RuntimeError(f"EventKit saveEvent failed for '{title}'")
+
+    event_id = str(event.eventIdentifier())
+    print(f"  [create_event] created '{title}' on {date_str} ({event_id[:8]}...)")
+    return event_id
+
+
+def move_event(
+    event_identifier: str,
+    new_date_str: str,
+    new_start_time: str,
+    new_end_time: str,
+) -> bool:
+    """Move an existing event to a new date/time by EventKit identifier.
+
+    Args:
+        new_date_str:    YYYY-MM-DD
+        new_start_time:  HH:MM (24h)
+        new_end_time:    HH:MM (24h)
+    """
+    event = _event_store.eventWithIdentifier_(event_identifier)
+    if event is None:
+        raise ValueError(f"Event not found: {event_identifier}")
+
+    event.setStartDate_(_parse_ns_date(new_date_str, new_start_time))
+    event.setEndDate_(_parse_ns_date(new_date_str, new_end_time))
+
+    error_ptr = None
+    success = _event_store.saveEvent_span_commit_error_(
+        event, EventKit.EKSpanThisEvent, True, error_ptr
+    )
+    if not success:
+        raise RuntimeError(f"EventKit saveEvent failed for move ({event_identifier[:8]}...)")
+
+    print(f"  [move_event] moved event to {new_date_str} {new_start_time}-{new_end_time}")
+    return True
+
+
+# ---------------------------------------------------------------------------
+
 def full_sync():
     """Full sync: calendar + reminders. Runs synchronously."""
     print("  [sync] starting full sync...")

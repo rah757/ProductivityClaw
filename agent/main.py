@@ -6,7 +6,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.error import Conflict
 from agent.config import TELEGRAM_TOKEN, ALLOWED_USERS, OLLAMA_MODEL, DB_PATH
-from agent.bot.telegram_handler import handle_message, handle_feedback, handle_sync, handle_noop
+from agent.bot.telegram_handler import handle_message, handle_feedback, handle_sync, handle_noop, handle_write_confirm
 from agent.integrations.apple_calendar import request_permissions, full_sync
 
 def _cron_sync_loop():
@@ -59,6 +59,7 @@ def main():
     app.add_handler(CommandHandler("sync", handle_sync))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_feedback, pattern=r"^feedback:"))
+    app.add_handler(CallbackQueryHandler(handle_write_confirm, pattern=r"^writeconfirm:"))
     app.add_handler(CallbackQueryHandler(handle_noop, pattern=r"^noop$"))
 
     print("Bot is running. Send a message on Telegram.")
