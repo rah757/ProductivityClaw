@@ -6,7 +6,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from telegram.error import Conflict
 from agent.config import TELEGRAM_TOKEN, ALLOWED_USERS, MLX_MODEL, DB_PATH
-from agent.bot.telegram_handler import handle_message, handle_feedback, handle_sync, handle_noop, handle_write_confirm
+from agent.bot.telegram_handler import handle_message, handle_feedback, handle_sync, handle_noop, handle_write_confirm, _md_to_tg_html
 from agent.integrations.apple_calendar import request_permissions, full_sync
 from agent.scheduler.briefing import start_heartbeat, set_send_fn
 
@@ -67,8 +67,9 @@ def main():
     async def _heartbeat_send(text: str):
         """Send a heartbeat message to the first allowed user."""
         bot = app.bot
+        html_text = _md_to_tg_html(f"🫀 {text}")
         for user_id in ALLOWED_USERS:
-            await bot.send_message(chat_id=user_id, text=f"🫀 {text}")
+            await bot.send_message(chat_id=user_id, text=html_text, parse_mode="HTML")
             break  # just send to the first allowed user
 
     set_send_fn(_heartbeat_send)

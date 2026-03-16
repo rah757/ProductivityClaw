@@ -29,3 +29,8 @@ docker-compose.override.yml
 
 # Claude worktrees
 .claude/worktrees/
+
+# Internal docs
+ARCHITECTURE.md
+DECISIONS.md
+plan.MD

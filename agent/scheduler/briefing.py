@@ -11,7 +11,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from agent.config import MLX_MODEL, MLX_BASE_URL
 from agent.core.prompts import get_system_prompt
-from agent.integrations.apple_calendar import fetch_all_events
+from agent.integrations.apple_calendar import fetch_all_events, full_sync
 from agent.memory.context_store import get_recent_dumps
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
@@ -83,6 +83,9 @@ def _heartbeat_tick():
     if not heartbeat_md:
         return
 
+    # Force fresh calendar data (cache is 5-min TTL, heartbeat ticks every 30min)
+    full_sync()
+
     context = _build_heartbeat_context()
     system = f"{get_system_prompt()}\n\n{heartbeat_md}"
 
@@ -100,15 +103,22 @@ def _heartbeat_tick():
 
     try:
         response = llm.invoke(messages)
+        # Handle list-type content from MLX/OpenAI API
+        if isinstance(response.content, list):
+            text_parts = [
+                c["text"] if isinstance(c, dict) and "text" in c else str(c)
+                for c in response.content
+            ]
+            response.content = "".join(text_parts)
         text = response.content or ""
         # Strip <think> tags
         text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
-        if SKIP_TOKEN in text:
+        if not text or SKIP_TOKEN in text:
             print(f"  [heartbeat] {datetime.now().strftime('%H:%M')} — nothing to report")
             return
 
-        if text and _send_message_fn:
+        if _send_message_fn:
             print(f"  [heartbeat] {datetime.now().strftime('%H:%M')} — sending: {text[:60]}...")
             # Run the async send function from sync context
             loop = asyncio.new_event_loop()
