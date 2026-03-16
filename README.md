@@ -58,6 +58,7 @@ Free, instant setup, runs on your phone. Rich inline buttons enable the human-in
 | Chat Interface | Telegram Bot API | Free, inline buttons for confirmation, runs on phone |
 | Memory | SQLite + FTS5 | Local-first, BM25 search, zero config |
 | Calendar | Apple EventKit (PyObjC) | Native macOS, no API keys, works offline |
+| Email | Apple Mail (ScriptingBridge) | Same native pattern as EventKit, zero credentials |
 | Eval | DeepEval | (planned) |
 
 ## Skills
@@ -77,7 +78,7 @@ Write skills that modify external systems (calendar) use a **pending action work
 | Phase | Focus | Status |
 |-------|-------|--------|
 | **1 — Prove the Loop** | Telegram + Calendar + Memory + Heartbeat + Eval | Nearly complete |
-| 2 — Intelligence | Epoch reasoning loop, email ingestion, memory organization | Planned |
+| 2 — Intelligence | Epoch reasoning loop, email ingestion, MCP integrations, memory organization | Planned |
 | 3 — Proactive | Proactive suggestions, pattern recognition, smart reminders | Planned |
 | 4 — Polish | Siri Shortcuts, vision, multi-modal, eval dashboard | Future |
 | 5 — Ecosystem | Skill import pipeline, multi-agent, OSS community | Future |
