@@ -8,6 +8,12 @@ Not "here's your calendar." More like: **"Based on your deadlines, habits, and p
 
 Every productivity tool shows you *what* you have. None of them tell you *what matters*. ProductivityClaw sits on top of your existing tools, learns your patterns over time, and surfaces what's actually important — without you asking.
 
+## System Architecture
+<img width="793" height="669" alt="image" src="https://github.com/user-attachments/assets/e12d98d8-906d-44d9-85f6-cf8299fda431" />
+<img width="772" height="561" alt="image" src="https://github.com/user-attachments/assets/524a1531-5989-437c-8e1d-402c3444dc16" />
+<img width="767" height="371" alt="image" src="https://github.com/user-attachments/assets/5354fbcb-8249-40e3-8641-87d8b1adc1b7" />
+
+
 ## Architecture Decisions
 
 ### Why Local LLM
