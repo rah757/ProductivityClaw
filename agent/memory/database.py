@@ -69,6 +69,18 @@ def init_db():
         -- FTS5 full-text search index over context_dumps
         CREATE VIRTUAL TABLE IF NOT EXISTS context_dumps_fts
         USING fts5(content, trace_id UNINDEXED, created_at UNINDEXED);
+
+        CREATE TABLE IF NOT EXISTS processed_emails (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id      TEXT NOT NULL UNIQUE,
+            subject         TEXT,
+            sender          TEXT,
+            account_name    TEXT,
+            classification  TEXT NOT NULL,
+            summary         TEXT,
+            context_dump_id INTEGER,
+            processed_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
     """)
     db.commit()
 
@@ -85,6 +97,11 @@ def init_db():
 
     # Migration: drop old context_dumps if it uses the legacy schema (raw_text column)
     cols = {row[1] for row in db.execute("PRAGMA table_info(context_dumps)").fetchall()}
+    if "archived" not in cols:
+        db.execute("ALTER TABLE context_dumps ADD COLUMN archived INTEGER DEFAULT 0")
+        db.commit()
+        print("  [db] added 'archived' column to context_dumps")
+
     if "raw_text" in cols:
         db.execute("DROP TABLE context_dumps")
         db.execute("""

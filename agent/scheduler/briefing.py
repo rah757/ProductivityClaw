@@ -12,7 +12,9 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from agent.config import MLX_MODEL, MLX_BASE_URL
 from agent.core.prompts import get_system_prompt
 from agent.integrations.apple_calendar import fetch_all_events, full_sync
-from agent.memory.context_store import get_recent_dumps
+from agent.integrations.apple_mail import get_unprocessed_emails, classify_emails
+from agent.memory.context_store import get_recent_dumps, store_context_dump
+from agent.memory.database import db
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 _CORE_DIR = os.path.join(os.path.dirname(_DIR), "core")
@@ -22,6 +24,20 @@ SKIP_TOKEN = "HEARTBEAT_SKIP"
 
 # Will be set by main.py after bot starts
 _send_message_fn = None
+
+# ── LLM priority lock ───────────────────────────────────────────
+_last_user_message_ts: float = 0.0
+
+
+def record_user_activity():
+    """Called by telegram_handler on every user message."""
+    global _last_user_message_ts
+    _last_user_message_ts = time.time()
+
+
+def is_user_active() -> bool:
+    """True if user messaged within last 2 minutes (MLX is single-threaded)."""
+    return (time.time() - _last_user_message_ts) < 120
 
 
 def set_send_fn(fn):
@@ -71,6 +87,20 @@ def _build_heartbeat_context() -> str:
         for d in dumps:
             parts.append(f"  - {d['content']} ({d['created_at']})")
 
+    # HIGH-priority emails from last 24h
+    try:
+        high_emails = db.execute(
+            "SELECT summary, sender FROM processed_emails "
+            "WHERE classification = 'HIGH' AND processed_at > datetime('now', '-1 day') "
+            "ORDER BY processed_at DESC LIMIT 5"
+        ).fetchall()
+        if high_emails:
+            parts.append("HIGH-priority emails needing attention:")
+            for e in high_emails:
+                parts.append(f"  - {e[0]} (from: {e[1]})")
+    except Exception:
+        pass
+
     return "\n".join(parts)
 
 
@@ -85,6 +115,59 @@ def _heartbeat_tick():
 
     # Force fresh calendar data (cache is 5-min TTL, heartbeat ticks every 30min)
     full_sync()
+
+    # ── Email sync + classify ────────────────────────────────────
+    high_alerts = []
+    if not is_user_active():
+        try:
+            new_emails = get_unprocessed_emails(hours=24)
+            if new_emails:
+                print(f"  [heartbeat] classifying {len(new_emails)} new emails...")
+                classified = classify_emails(new_emails)
+                for item in classified:
+                    context_dump_id = None
+                    cls = item["classification"]
+
+                    # HIGH/LOW → store in context_dumps
+                    if cls in ("HIGH", "LOW"):
+                        context_dump_id = store_context_dump(
+                            trace_id=f"email-{item['message_id'][:8]}",
+                            content=f"[{cls}] {item['summary']}",
+                            source="email",
+                        )
+
+                    # Log all in processed_emails
+                    db.execute(
+                        "INSERT OR IGNORE INTO processed_emails "
+                        "(message_id, subject, sender, account_name, classification, summary, context_dump_id) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (item["message_id"], item["subject"], item["sender"],
+                         item.get("account", ""), cls, item["summary"], context_dump_id),
+                    )
+
+                    if cls == "HIGH":
+                        high_alerts.append(item)
+
+                db.commit()
+                print(f"  [heartbeat] processed {len(classified)} emails "
+                      f"({len(high_alerts)} HIGH)")
+        except Exception as e:
+            print(f"  [heartbeat] email sync error: {e}")
+    else:
+        print("  [heartbeat] user active, deferring email classification")
+
+    # ── Send immediate HIGH email alerts ─────────────────────────
+    if high_alerts and _send_message_fn:
+        lines = ["📧 <b>Emails needing attention:</b>"]
+        for e in high_alerts:
+            lines.append(f"• {e['summary']} <i>(from: {e['sender']})</i>")
+        alert_text = "\n".join(lines)
+        try:
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(_send_message_fn(alert_text))
+            loop.close()
+        except Exception as e:
+            print(f"  [heartbeat] email alert send error: {e}")
 
     context = _build_heartbeat_context()
     system = f"{get_system_prompt()}\n\n{heartbeat_md}"

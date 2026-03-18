@@ -3,12 +3,14 @@
 from agent.memory.database import db
 
 
-def store_context_dump(trace_id: str, content: str, source: str = "telegram"):
-    """Persist a context dump from the user and sync to FTS5 index."""
-    db.execute(
+def store_context_dump(trace_id: str, content: str, source: str = "telegram") -> int:
+    """Persist a context dump from the user and sync to FTS5 index.
+    Returns the row id of the inserted context_dump."""
+    cursor = db.execute(
         "INSERT INTO context_dumps (trace_id, content, source) VALUES (?, ?, ?)",
         (trace_id, content, source),
     )
+    row_id = cursor.lastrowid
     # Keep FTS index in sync
     db.execute(
         "INSERT INTO context_dumps_fts (content, trace_id, created_at) "
@@ -16,6 +18,7 @@ def store_context_dump(trace_id: str, content: str, source: str = "telegram"):
         (content, trace_id),
     )
     db.commit()
+    return row_id
 
 
 def search_context_dumps(query: str, limit: int = 5) -> list[dict]:
@@ -48,7 +51,7 @@ def get_recent_dumps(limit: int = 10) -> list[dict]:
     """Return the most recent context dumps, newest first."""
     rows = db.execute(
         "SELECT trace_id, content, source, created_at FROM context_dumps "
-        "ORDER BY created_at DESC LIMIT ?",
+        "WHERE archived = 0 ORDER BY created_at DESC LIMIT ?",
         (limit,),
     ).fetchall()
     return [

@@ -32,6 +32,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ALLOWED_USERS:
         return
 
+    # Track activity for LLM priority lock (heartbeat defers if user active)
+    from agent.scheduler.briefing import record_user_activity
+    record_user_activity()
+
     user_text = update.message.text
     trace_id = str(uuid.uuid4())[:8]
 

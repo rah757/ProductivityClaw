@@ -1,0 +1,18 @@
+{
+  "name": "get_emails",
+  "description": "Fetch the user's recent emails. Use this when the user asks about their email, inbox, or messages. Returns classified emails (HIGH/LOW/NOISE) with summaries.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "timeframe": {
+        "type": "string",
+        "description": "How far back to look. Allowed values: 'today', 'recent' (last 7 days). Default: 'today'."
+      },
+      "filter": {
+        "type": "string",
+        "description": "Filter by classification. Allowed values: 'all', 'high', 'low'. Default: 'all'."
+      }
+    },
+    "required": []
+  }
+}
