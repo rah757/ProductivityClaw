@@ -710,6 +710,38 @@ CREATE TABLE agent_questions (
 - Tool call accuracy target: >90%
 - Fact extraction precision target: >80%
 
+#### 4.16 Telegram Streaming Response
+- Stream Qwen 3.5 outputs by editing a single Telegram message in-place
+- Tiered time-based flushing to feel snappy early then back off:
+  - 0.3s for the first 5 edits
+  - 0.5s for the next 5
+  - 1.2s for the next 5
+  - 3.3s from there on
+- Caps at ~30 edits/min — right at Telegram's rate limit with no risk
+- Most responses won't even hit the 3.3s phase
+- Optionally snap flushes to sentence boundaries for cleaner reads
+- Implemented as a reusable `stream_to_telegram()` function
+
+#### 4.17 LLM Priority Lock
+- MLX is single-threaded: chat always wins, heartbeat defers 5 min if user messaged < 2 min ago
+- `record_user_activity()` called on every Telegram message
+- `is_user_active()` checked at heartbeat tick before email classification LLM call
+
+#### 4.18 Email Ingestion (Apple Mail via ScriptingBridge)
+- Fetch from all INBOX mailboxes, classify via single LLM call (HIGH/LOW/NOISE)
+- Store summaries in context_dumps (source='email'), track in processed_emails table
+- HIGH → immediate Telegram alert, LOW → stored silently, NOISE → logged only
+- Body included (500 char truncation), <30 emails/day fits in one LLM call
+
+#### 4.19 Epoch Reasoning Loop (12h)
+- `SELECT * FROM context_dumps WHERE archived = 0` IS the diff
+- Runs with think=True, consolidates patterns, promotes to CONTEXT.md
+- Archives after 2-3 weeks (archived=1, still searchable but deprioritized)
+
+#### 4.20 LLM-as-Judge Feedback Pipeline
+- Thumbs-down → failure analysis → auto-generate DeepEval test cases
+- Self-improving eval pipeline
+
 ### Phase 2 Exit Criteria
 - [ ] "Move my 3pm to tomorrow" works with confirmation
 - [ ] Say "I prefer morning meetings" once → agent references it a week later

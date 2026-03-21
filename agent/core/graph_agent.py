@@ -264,6 +264,107 @@ def chat_with_llm(
     return final_message, latency_ms, pending_id
 
 
+def chat_with_llm_stream(
+    user_message: str,
+    recent_context: list,
+    trace_id: str | None = None,
+):
+    """Streaming variant — yields (token, pending_action_id) tuples.
+
+    For tool calls, runs the full graph synchronously first, then yields
+    the final response as a single chunk (can't stream mid-tool-loop).
+    For direct responses (no tools), streams token by token.
+    """
+    from agent.core.intent_router import classify
+
+    intent = classify(user_message)
+    print(f"  [router] intent={intent}")
+
+    # Build messages (same as chat_with_llm)
+    sys_content = get_system_prompt()
+    sys_content += f"\n\nCurrent time: {datetime.now().strftime('%A, %B %d, %Y at %I:%M %p')}"
+
+    t0 = time.perf_counter()
+    memories = search_context_dumps(user_message, limit=3)
+    fts_ms = int((time.perf_counter() - t0) * 1000)
+    if memories:
+        sys_content += "\n\n--- THINGS THE USER PREVIOUSLY TOLD YOU (use these to answer) ---"
+        for m in memories:
+            sys_content += f"\n- {m['content']} ({m['created_at']})"
+        sys_content += "\n--- END MEMORIES ---"
+    print(f"  [fts5] {len(memories)} memories ({fts_ms}ms)")
+
+    messages = [SystemMessage(content=sys_content)]
+    for msg in recent_context:
+        role = msg["role"] if isinstance(msg, dict) else msg[0]
+        content = msg["content"] if isinstance(msg, dict) else msg[1]
+        if role == "user":
+            messages.append(HumanMessage(content=content))
+        else:
+            messages.append(AIMessage(content=content))
+    messages.append(HumanMessage(content=user_message))
+
+    if trace_id:
+        _inject_trace_id(trace_id)
+
+    # Build LLM (no graph — direct streaming for simple responses)
+    llm = ChatOpenAI(
+        base_url=MLX_BASE_URL,
+        api_key="not-needed",
+        model=MLX_MODEL,
+        temperature=0.1,
+    )
+
+    all_tools = load_skills()
+    tool_names = intent["tools"]
+    if tool_names is None:
+        selected = all_tools
+    elif len(tool_names) == 0:
+        selected = []
+    else:
+        tool_map = {t.name: t for t in all_tools}
+        selected = [tool_map[n] for n in tool_names if n in tool_map]
+
+    if selected:
+        llm_with_tools = llm.bind_tools(selected)
+    else:
+        llm_with_tools = llm
+
+    print(f"  [stream] tools={[t.name for t in selected]}")
+
+    # First, do a streaming call to check if LLM wants to call tools
+    first_chunks = []
+    has_tool_calls = False
+
+    for chunk in llm_with_tools.stream(messages):
+        first_chunks.append(chunk)
+        if chunk.tool_calls or (hasattr(chunk, 'additional_kwargs') and
+                                 chunk.additional_kwargs.get('tool_calls')):
+            has_tool_calls = True
+
+    if has_tool_calls:
+        # Tool call detected — fall back to non-streaming graph execution
+        print("  [stream] tool call detected, falling back to graph")
+        text, latency, pending_id = chat_with_llm(user_message, recent_context, trace_id)
+        yield text, pending_id
+        return
+
+    # No tool calls — re-stream for real this time (or use collected chunks)
+    pending_id = None
+    for chunk in first_chunks:
+        token = ""
+        if isinstance(chunk.content, str):
+            token = chunk.content
+        elif isinstance(chunk.content, list):
+            for c in chunk.content:
+                if isinstance(c, dict) and "text" in c:
+                    token += c["text"]
+                elif isinstance(c, str):
+                    token += c
+        if token:
+            yield token, pending_id
+
+
 # ---------------------------------------------------------------------------
 # Dev / standalone test
 # ---------------------------------------------------------------------------

@@ -28,7 +28,7 @@ from agent.memory.agent_created_events import register_agent_event
 from agent.integrations.apple_calendar import full_sync, create_event, move_event
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming Telegram messages."""
+    """Handle incoming Telegram messages with streaming response."""
     if update.effective_user.id not in ALLOWED_USERS:
         return
 
@@ -47,21 +47,86 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     recent = get_recent_conversations(limit=4)
 
     await update.message.chat.send_action("typing")
-    print(f"  [{trace_id}] Received message, routing to LangGraph...")
+    print(f"  [{trace_id}] Received message, streaming via LangGraph...")
+
+    t0 = time.time()
 
     try:
-        from agent.core.graph_agent import chat_with_llm as graph_chat
-        response_text, latency_ms, pending_action_id = graph_chat(user_text, recent, trace_id=trace_id)
+        from agent.core.graph_agent import chat_with_llm_stream, chat_with_llm as graph_chat
+        from agent.bot.streaming import stream_to_telegram
+
+        # Collect tokens from the sync generator in a thread
+        tokens = []
+        pending_action_id = None
+
+        def _run_stream():
+            nonlocal pending_action_id
+            for token, pid in chat_with_llm_stream(user_text, recent, trace_id=trace_id):
+                tokens.append(token)
+                if pid is not None:
+                    pending_action_id = pid
+
+        # Run generator in thread, stream to Telegram from async context
+        import queue
+
+        token_queue = queue.Queue()
+        stream_done = threading.Event()
+
+        def _producer():
+            nonlocal pending_action_id
+            try:
+                for token, pid in chat_with_llm_stream(user_text, recent, trace_id=trace_id):
+                    token_queue.put(token)
+                    if pid is not None:
+                        pending_action_id = pid
+            except Exception as e:
+                token_queue.put(None)  # signal error
+                print(f"  [{trace_id}] stream error: {e}")
+                import traceback
+                traceback.print_exc()
+            finally:
+                stream_done.set()
+
+        def _token_iter():
+            """Sync iterator that reads from the queue until done."""
+            while True:
+                try:
+                    token = token_queue.get(timeout=0.1)
+                    if token is None:
+                        break
+                    yield token
+                except queue.Empty:
+                    if stream_done.is_set() and token_queue.empty():
+                        break
+
+        # Start producer thread
+        producer = threading.Thread(target=_producer, daemon=True)
+        producer.start()
+
+        # Stream to Telegram
+        response_text, stream_msg = await stream_to_telegram(
+            chat_id=update.effective_chat.id,
+            bot=context.bot,
+            token_generator=_token_iter(),
+            parse_mode="HTML",
+            format_fn=_md_to_tg_html,
+        )
+
+        producer.join(timeout=5)
+        latency_ms = int((time.time() - t0) * 1000)
+
+        if not response_text:
+            response_text = ""
+
     except Exception as e:
         import traceback
         traceback.print_exc()
-        response_text = f"Error talking to LangGraph: {e}"
-        latency_ms = 0
+        response_text = f"Error: {e}"
+        latency_ms = int((time.time() - t0) * 1000)
         pending_action_id = None
+        stream_msg = None
 
-    # Only log assistant response to conversation history if it's a normal reply.
-    # Pending-action responses ("please confirm") poison future context --
-    # the LLM sees "I created X" and copies the pattern instead of calling tools.
+    # Log
     if not pending_action_id:
         log_message(trace_id, "telegram", "assistant", response_text, {
             "model": MLX_MODEL,
@@ -73,6 +138,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "model": MLX_MODEL,
     })
 
+    # Handle pending actions (tool calls that need confirmation)
     if pending_action_id:
         action = get_pending_action(pending_action_id)
         keyboard = InlineKeyboardMarkup([[
@@ -81,15 +147,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]])
         desc_html = html_escape(action['description']) if action else ""
         body = f"{_md_to_tg_html(response_text)}\n\n<i>{desc_html}</i>" if action else _md_to_tg_html(response_text)
-        await update.message.reply_text(body or "Done.", reply_markup=keyboard, parse_mode="HTML")
+        if stream_msg:
+            # Edit the streamed message to add buttons
+            try:
+                await stream_msg.edit_text(body or "Done.", reply_markup=keyboard, parse_mode="HTML")
+            except Exception:
+                await update.message.reply_text(body or "Done.", reply_markup=keyboard, parse_mode="HTML")
+        else:
+            await update.message.reply_text(body or "Done.", reply_markup=keyboard, parse_mode="HTML")
     else:
+        # Add feedback buttons to the streamed message
         feedback_keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("👍", callback_data=f"feedback:up:{trace_id}"),
             InlineKeyboardButton("👎", callback_data=f"feedback:down:{trace_id}"),
         ]])
-        await update.message.reply_text(_md_to_tg_html(response_text) or "Done.", reply_markup=feedback_keyboard, parse_mode="HTML")
+        if stream_msg:
+            try:
+                formatted = _md_to_tg_html(response_text) if response_text else "Done."
+                await stream_msg.edit_text(formatted, reply_markup=feedback_keyboard, parse_mode="HTML")
+            except Exception:
+                pass  # message already has the text, just couldn't add buttons
+        else:
+            await update.message.reply_text(
+                _md_to_tg_html(response_text) or "Done.",
+                reply_markup=feedback_keyboard,
+                parse_mode="HTML",
+            )
 
-    print(f"[{trace_id}] llm:{latency_ms}ms | User: {user_text[:50]} | Agent: {response_text[:50]}")
+    print(f"[{trace_id}] llm:{latency_ms}ms | User: {user_text[:50]} | Agent: {(response_text or '')[:50]}")
 
 async def handle_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle thumbs up/down button presses."""
