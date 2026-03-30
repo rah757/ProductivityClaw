@@ -13,6 +13,7 @@ from agent.config import MLX_MODEL, MLX_BASE_URL
 from agent.core.prompts import get_system_prompt
 from agent.integrations.apple_calendar import fetch_all_events, full_sync
 from agent.integrations.apple_mail import get_unprocessed_emails, classify_emails
+from agent.integrations.apple_notes import ingest_notes
 from agent.memory.context_store import get_recent_dumps, store_context_dump
 from agent.memory.database import db
 
@@ -155,6 +156,15 @@ def _heartbeat_tick():
             print(f"  [heartbeat] email sync error: {e}")
     else:
         print("  [heartbeat] user active, deferring email classification")
+
+    # ── Notes sync ───────────────────────────────────────────────
+    if not is_user_active():
+        try:
+            new_notes = ingest_notes(modified_since_days=60)
+            if new_notes:
+                print(f"  [heartbeat] ingested {new_notes} new/updated notes")
+        except Exception as e:
+            print(f"  [heartbeat] notes sync error: {e}")
 
     # ── Send immediate HIGH email alerts ─────────────────────────
     if high_alerts and _send_message_fn:
