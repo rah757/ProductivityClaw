@@ -43,7 +43,7 @@ class TestStoreContextSkill:
             assert result == "Stored."
             mock_store.assert_called_once()
             _, kwargs = mock_store.call_args
-            assert "morning meetings" in mock_store.call_args[0][1]  # content arg
+            assert "morning meetings" in kwargs.get("content", "")  # content kwarg
 
     def test_trace_id_injected(self):
         with patch("agent.memory.context_store.store_context_dump") as mock_store:
@@ -56,8 +56,8 @@ class TestStoreContextSkill:
             mod._current_trace_id = "abc12345"
 
             mod.execute(text="test content")
-            call_args = mock_store.call_args[0]
-            assert call_args[0] == "abc12345"  # trace_id
+            _, kwargs = mock_store.call_args
+            assert kwargs.get("trace_id") == "abc12345"
 
 
 # ===========================================================================
@@ -136,44 +136,41 @@ class TestMoveEventSkill:
 
     def test_returns_pending_action_token_when_found(self):
         mod = self._load_module()
-        with patch("agent.integrations.apple_calendar.find_event_identifier",
-                   return_value="EK-FAKE-ID-001"):
-            result = mod.execute(
-                event_title="Sprint Planning",
-                current_date="2026-03-09",
-                new_date="2026-03-10",
-                new_start_time="10:00",
-                new_end_time="11:00",
-            )
+        mod.find_event_identifier = MagicMock(return_value="EK-FAKE-ID-001")
+        result = mod.execute(
+            event_title="Sprint Planning",
+            current_date="2026-03-09",
+            new_date="2026-03-10",
+            new_start_time="10:00",
+            new_end_time="11:00",
+        )
         assert result.startswith("PENDING_ACTION:")
         assert "Sprint Planning" in result
 
     def test_returns_error_when_not_found(self):
         mod = self._load_module()
-        with patch("agent.integrations.apple_calendar.find_event_identifier",
-                   return_value=None):
-            result = mod.execute(
-                event_title="Ghost Meeting",
-                current_date="2026-03-09",
-                new_date="2026-03-10",
-                new_start_time="10:00",
-                new_end_time="11:00",
-            )
+        mod.find_event_identifier = MagicMock(return_value=None)
+        result = mod.execute(
+            event_title="Ghost Meeting",
+            current_date="2026-03-09",
+            new_date="2026-03-10",
+            new_start_time="10:00",
+            new_end_time="11:00",
+        )
         assert "Could not find" in result
         assert "Ghost Meeting" in result
 
     def test_payload_contains_identifier(self):
         from agent.memory.pending_actions import get_pending_action
         mod = self._load_module()
-        with patch("agent.integrations.apple_calendar.find_event_identifier",
-                   return_value="EK-REAL-ID-XYZ"):
-            result = mod.execute(
-                event_title="Sprint Planning",
-                current_date="2026-03-09",
-                new_date="2026-03-11",
-                new_start_time="14:00",
-                new_end_time="15:00",
-            )
+        mod.find_event_identifier = MagicMock(return_value="EK-REAL-ID-XYZ")
+        result = mod.execute(
+            event_title="Sprint Planning",
+            current_date="2026-03-09",
+            new_date="2026-03-11",
+            new_start_time="14:00",
+            new_end_time="15:00",
+        )
         action_id = result.split(":")[1].split("|")[0].strip()
         action = get_pending_action(action_id)
         payload = json.loads(action["payload"])
@@ -221,8 +218,6 @@ class TestGraphPendingActionDetection:
 
     def test_pending_action_sets_state(self):
         """Simulate call_tools receiving a PENDING_ACTION result."""
-        from langchain_core.messages import AIMessage, ToolMessage
-
         # Fake a tool call result
         fake_result = "PENDING_ACTION:abc12345|Create 'Standup' on 2026-03-15 09:00-09:30"
 

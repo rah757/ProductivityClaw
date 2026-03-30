@@ -8,3 +8,5 @@ langchain-core==0.3.35
 langchain-openai>=0.3.0
 langgraph==0.2.70
 mlx-lm>=0.22.0
+pyobjc-framework-ScriptingBridge>=10.1
+deepeval>=2.0.0
