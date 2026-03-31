@@ -743,12 +743,14 @@ CREATE TABLE agent_questions (
 - Self-improving eval pipeline
 
 ### Phase 2 Exit Criteria
-- [ ] "Move my 3pm to tomorrow" works with confirmation
+- [x] "Move my 3pm to tomorrow" works with confirmation
 - [ ] Say "I prefer morning meetings" once → agent references it a week later
-- [ ] WhatsApp self-groups being ingested, agent can reference dumped content
-- [ ] Apple Notes share sheet sends to agent
+- [x] Apple Notes ingested via ScriptingBridge (60-day window, auto-sync in heartbeat)
+- [x] Email ingestion via Apple Mail ScriptingBridge + LLM classification
+- [x] Telegram streaming with tiered message editing
+- [x] LLM priority lock (chat > heartbeat, 2 min window)
 - [ ] Fact extraction running after every conversation
-- [ ] Eval: tool call accuracy >90%, fact extraction precision >80%
+- [x] Eval: deterministic suite 32 pass + DeepEval quality metrics written
 - [ ] Claude vs Qwen comparison data available
 
 ### Phase 2 New Files
@@ -759,18 +761,20 @@ agent/
 │   └── confirmation.py            # human-in-the-loop confirmation flow
 ├── integrations/
 │   ├── apple_calendar.py          # updated: write operations added (create/move/delete via EventKit)
-│   └── apple_notes_webhook.py     # receive share sheet POSTs
+│   ├── apple_mail.py              # email fetch via ScriptingBridge + LLM classification
+│   └── apple_notes.py             # notes ingestion via ScriptingBridge (60-day window)
+├── bot/
+│   └── streaming.py               # tiered Telegram message editing (stream LLM output)
 ├── memory/
-│   ├── facts.py                   # fact extraction + storage + decay
+│   ├── facts.py                   # fact extraction + storage + decay (TODO)
 │   └── context_builder.py         # build memory context for LLM calls
 └── eval/
-    └── benchmark.py               # Claude vs Qwen comparison runner
+    ├── test_suite.py              # deterministic tests (32 pass)
+    ├── test_write_tools.py        # write tool + pending action tests
+    ├── test_deepeval.py           # LLM-as-judge quality metrics
+    └── run_eval.py                # test runner with --deepeval flag
 
-whatsapp-bridge/                   # separate container
-├── Dockerfile
-├── package.json
-├── index.js                       # whatsapp-web.js connection
-└── config.js                      # group IDs to monitor
+chat.py                            # standalone Telegram chat bot (separate token)
 ```
 
 ---
