@@ -11,6 +11,7 @@ __pycache__/
 
 # Eval results (regenerable)
 data/eval/results/
+.deepeval/
 
 # IDE
 .vscode/
