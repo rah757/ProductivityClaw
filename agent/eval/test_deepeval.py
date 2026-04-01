@@ -40,10 +40,36 @@ pytestmark = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 if DEEPEVAL_AVAILABLE:
+    import re as _re
+
+    def _clean_llm_output(content) -> str:
+        """Extract usable text from MLX response: handle list content,
+        strip <think> tags, and find JSON if present."""
+        if isinstance(content, list):
+            text = " ".join(
+                c["text"] if isinstance(c, dict) and "text" in c else str(c)
+                for c in content
+            )
+        else:
+            text = str(content or "")
+
+        full_text = text
+        # Strip think tags
+        clean = _re.sub(r"<think>.*?</think>", "", full_text, flags=_re.DOTALL).strip()
+
+        # If clean text is empty but full text has content, search full text for JSON
+        if not clean and full_text:
+            json_match = _re.search(r"[\[{].*[\]}]", full_text, _re.DOTALL)
+            if json_match:
+                return json_match.group()
+
+        return clean if clean else full_text
+
     class MLXJudge(DeepEvalBaseLLM):
         """Use the local MLX server as the DeepEval judge model."""
 
         def __init__(self):
+            import httpx
             from langchain_openai import ChatOpenAI
             from agent.config import MLX_MODEL, MLX_BASE_URL
             self._model = ChatOpenAI(
@@ -52,30 +78,40 @@ if DEEPEVAL_AVAILABLE:
                 model=MLX_MODEL,
                 temperature=0.1,
                 max_tokens=4000,
+                timeout=300,
+                http_client=httpx.Client(timeout=300),
+                http_async_client=httpx.AsyncClient(timeout=300),
             )
 
         def load_model(self):
             return self._model
 
-        def generate(self, prompt: str) -> str:
-            response = self._model.invoke(prompt)
+        def _extract_content(self, response) -> str:
+            """Extract text from response, checking all possible fields."""
             content = response.content
-            if isinstance(content, list):
-                return " ".join(
-                    c["text"] if isinstance(c, dict) and "text" in c else str(c)
-                    for c in content
-                )
-            return str(content or "")
+            # Check for reasoning content in additional_kwargs
+            ak = getattr(response, "additional_kwargs", {}) or {}
+            reasoning = ak.get("reasoning_content", "")
+            print(f"\n[JUDGE-DEBUG] content type={type(content).__name__} len={len(str(content))}")
+            print(f"[JUDGE-DEBUG] content={repr(str(content)[:200])}")
+            print(f"[JUDGE-DEBUG] reasoning len={len(str(reasoning))}")
+            if reasoning:
+                print(f"[JUDGE-DEBUG] reasoning={repr(str(reasoning)[:200])}")
+            print(f"[JUDGE-DEBUG] additional_kwargs keys={list(ak.keys())}")
+
+            # If content is empty, try reasoning field
+            result = _clean_llm_output(content)
+            if not result and reasoning:
+                result = _clean_llm_output(reasoning)
+            return result
+
+        def generate(self, prompt: str) -> str:
+            response = self._model.invoke("/no_think\n" + prompt)
+            return self._extract_content(response)
 
         async def a_generate(self, prompt: str) -> str:
-            response = await self._model.ainvoke(prompt)
-            content = response.content
-            if isinstance(content, list):
-                return " ".join(
-                    c["text"] if isinstance(c, dict) and "text" in c else str(c)
-                    for c in content
-                )
-            return str(content or "")
+            response = await self._model.ainvoke("/no_think\n" + prompt)
+            return self._extract_content(response)
 
         def get_model_name(self):
             return "MLX-Qwen3.5-35B-A3B"
