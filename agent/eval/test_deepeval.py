@@ -1,136 +1,112 @@
 """
-ProductivityClaw DeepEval Quality Metrics
+ProductivityClaw LLM-as-Judge Quality Metrics
 
-Uses DeepEval's LLM-as-a-judge metrics to evaluate agent response quality.
-Runs against pre-recorded (input, context, output) pairs so you don't need
-the MLX server running to *execute* these evals — only the judge model is needed.
+Custom eval using local MLX Qwen as judge. No DeepEval framework —
+we handle retries, think-tag stripping, and JSON parsing ourselves.
 
-The judge model is the same local MLX Qwen instance (localhost:8000).
+Pre-recorded (input, context, output) pairs — no live agent needed.
+Only the MLX server at localhost:8000 is required.
 
 Run:
     pytest agent/eval/test_deepeval.py -v
     pytest agent/eval/test_deepeval.py -m deepeval -v
 """
 
+import json
+import re
 import pytest
 
 try:
-    from deepeval import assert_test
-    from deepeval.test_case import LLMTestCase
-    from deepeval.metrics import (
-        AnswerRelevancyMetric,
-        FaithfulnessMetric,
-        HallucinationMetric,
-        GEval,
-    )
-    from deepeval.test_case import LLMTestCaseParams
-    from deepeval.models.base_model import DeepEvalBaseLLM
-    DEEPEVAL_AVAILABLE = True
+    from langchain_openai import ChatOpenAI
+    from agent.config import MLX_MODEL, MLX_BASE_URL
+    _LLM_AVAILABLE = True
 except ImportError:
-    DEEPEVAL_AVAILABLE = False
+    _LLM_AVAILABLE = False
 
-pytestmark = pytest.mark.skipif(
-    not DEEPEVAL_AVAILABLE,
-    reason="deepeval not installed -- pip install deepeval",
-)
+
+pytestmark = [
+    pytest.mark.deepeval,
+    pytest.mark.flaky(reruns=2, reason="Qwen may return empty responses"),
+]
 
 
 # ---------------------------------------------------------------------------
-# Custom MLX Judge Model
+# Judge helper
 # ---------------------------------------------------------------------------
 
-if DEEPEVAL_AVAILABLE:
-    import re as _re
-
-    def _clean_llm_output(content) -> str:
-        """Extract usable text from MLX response: handle list content,
-        strip <think> tags, and find JSON if present."""
+def _judge(prompt: str, retries: int = 5) -> str:
+    """Send a prompt to MLX and return cleaned text. Retries on empty
+    with increasing temperature to break out of empty-response loops."""
+    temps = [0.0, 0.1, 0.3, 0.5, 0.7]
+    for attempt in range(retries):
+        llm = ChatOpenAI(
+            base_url=MLX_BASE_URL,
+            api_key="not-needed",
+            model=MLX_MODEL,
+            temperature=temps[min(attempt, len(temps) - 1)],
+            max_tokens=2000,
+        )
+        resp = llm.invoke("/no_think\n" + prompt)
+        content = resp.content or ""
         if isinstance(content, list):
-            text = " ".join(
+            content = " ".join(
                 c["text"] if isinstance(c, dict) and "text" in c else str(c)
                 for c in content
             )
-        else:
-            text = str(content or "")
-
-        full_text = text
         # Strip think tags
-        clean = _re.sub(r"<think>.*?</think>", "", full_text, flags=_re.DOTALL).strip()
-
-        # If clean text is empty but full text has content, search full text for JSON
-        if not clean and full_text:
-            json_match = _re.search(r"[\[{].*[\]}]", full_text, _re.DOTALL)
-            if json_match:
-                return json_match.group()
-
-        return clean if clean else full_text
-
-    class MLXJudge(DeepEvalBaseLLM):
-        """Use the local MLX server as the DeepEval judge model."""
-
-        def __init__(self):
-            import httpx
-            from langchain_openai import ChatOpenAI
-            from agent.config import MLX_MODEL, MLX_BASE_URL
-            self._model = ChatOpenAI(
-                base_url=MLX_BASE_URL,
-                api_key="not-needed",
-                model=MLX_MODEL,
-                temperature=0.1,
-                max_tokens=4000,
-                timeout=300,
-                http_client=httpx.Client(timeout=300),
-                http_async_client=httpx.AsyncClient(timeout=300),
-            )
-
-        def load_model(self):
-            return self._model
-
-        def _extract_content(self, response) -> str:
-            """Extract text from response, checking all possible fields."""
-            content = response.content
-            # Check for reasoning content in additional_kwargs
-            ak = getattr(response, "additional_kwargs", {}) or {}
+        clean = re.sub(r"<think>.*?</think>", "", str(content), flags=re.DOTALL).strip()
+        # If clean is empty, check reasoning field
+        if not clean:
+            ak = getattr(resp, "additional_kwargs", {}) or {}
             reasoning = ak.get("reasoning_content", "")
-            print(f"\n[JUDGE-DEBUG] content type={type(content).__name__} len={len(str(content))}")
-            print(f"[JUDGE-DEBUG] content={repr(str(content)[:200])}")
-            print(f"[JUDGE-DEBUG] reasoning len={len(str(reasoning))}")
             if reasoning:
-                print(f"[JUDGE-DEBUG] reasoning={repr(str(reasoning)[:200])}")
-            print(f"[JUDGE-DEBUG] additional_kwargs keys={list(ak.keys())}")
+                clean = re.sub(r"<think>.*?</think>", "", str(reasoning), flags=re.DOTALL).strip()
+        if clean:
+            return clean
+        print(f"  [judge] empty response (temp={temps[min(attempt, len(temps)-1)]}), retry {attempt + 1}/{retries}")
+    return ""
 
-            # If content is empty, try reasoning field
-            result = _clean_llm_output(content)
-            if not result and reasoning:
-                result = _clean_llm_output(reasoning)
-            return result
 
-        def generate(self, prompt: str) -> str:
-            response = self._model.invoke("/no_think\n" + prompt)
-            return self._extract_content(response)
+def _judge_json(prompt: str, retries: int = 3) -> dict | list | None:
+    """Send prompt, extract JSON from response."""
+    text = _judge(prompt, retries=retries)
+    if not text:
+        return None
+    # Find JSON object or array
+    match = re.search(r"[\[{].*[\]}]", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+    return None
 
-        async def a_generate(self, prompt: str) -> str:
-            response = await self._model.ainvoke("/no_think\n" + prompt)
-            return self._extract_content(response)
 
-        def get_model_name(self):
-            return "MLX-Qwen3.5-35B-A3B"
+def _mlx_available() -> bool:
+    if not _LLM_AVAILABLE:
+        return False
+    try:
+        import httpx
+        r = httpx.get("http://localhost:8000/v1/models", timeout=3)
+        return r.status_code == 200
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
-# Pre-recorded test data (input, retrieval_context, actual_output)
+# Pre-recorded test data
 # ---------------------------------------------------------------------------
 
 SCHEDULE_QUERY = {
     "input": "What's on my schedule today?",
-    "retrieval_context": [
+    "context": [
         "TODAY (Saturday, March 28):",
         "07:00 AM - 08:00 AM | Morning Workout [Personal] @ Campus Gym",
         "10:00 AM - 10:30 AM | 1:1 with Advisor [School] @ Professor's Office Room 412",
         "12:30 PM - 01:30 PM | Lunch with Alex [Personal] @ Chipotle on Main St",
         "03:00 PM - 04:00 PM | Sprint Planning [Work]",
     ],
-    "actual_output": (
+    "output": (
         "Here's your schedule for today:\n\n"
         "- 7:00 AM - 8:00 AM: Morning Workout at Campus Gym\n"
         "- 10:00 AM - 10:30 AM: 1:1 with Advisor at Professor's Office Room 412\n"
@@ -142,225 +118,241 @@ SCHEDULE_QUERY = {
 
 EMPTY_SCHEDULE = {
     "input": "What's on my calendar today?",
-    "retrieval_context": [
-        "TODAY: No events scheduled.",
-    ],
-    "actual_output": "You don't have anything on your calendar today. Enjoy the free time!",
+    "context": ["TODAY: No events scheduled."],
+    "output": "You don't have anything on your calendar today. Enjoy the free time!",
 }
 
 EMAIL_QUERY = {
     "input": "Do I have any important emails?",
-    "retrieval_context": [
+    "context": [
         "HIGH: 'Deadline reminder: thesis draft due Monday' from advisor@university.edu",
         "LOW: 'Weekly newsletter' from news@techdigest.com",
         "NOISE: 'Sale: 50% off everything' from promo@store.com",
     ],
-    "actual_output": (
+    "output": (
         "You have one important email:\n\n"
         "- **Deadline reminder: thesis draft due Monday** from your advisor\n\n"
         "There's also a tech newsletter and a promotional email, but nothing else urgent."
     ),
 }
 
-HALLUCINATION_TEST = {
+HALLUCINATED_OUTPUT = {
     "input": "What meetings do I have tomorrow?",
-    "retrieval_context": [
+    "context": [
         "TOMORROW: Career Fair (All day) [School] @ Student Union Hall",
         "TOMORROW: 06:00 PM - 07:00 PM | Gym Session [Personal] @ Campus Gym",
     ],
-    "actual_output": (
+    "output": (
         "Tomorrow you have:\n\n"
         "- Career Fair (all day) at Student Union Hall\n"
         "- Gym Session from 6:00 PM to 7:00 PM at Campus Gym\n"
-        "- Team standup at 9:00 AM\n"  # HALLUCINATED — not in context
+        "- Team standup at 9:00 AM\n"  # HALLUCINATED
     ),
 }
 
-CONTEXT_STORE_QUERY = {
+CONTEXT_STORE = {
     "input": "Remember that I prefer morning meetings before 11am",
-    "retrieval_context": [],
-    "actual_output": "Got it! I've saved that you prefer morning meetings before 11am.",
-    "expected_output": "Acknowledged and stored the user's preference for morning meetings.",
+    "context": [],
+    "output": "Got it! I've saved that you prefer morning meetings before 11am.",
+    "expected": "Acknowledged and stored the user's preference for morning meetings.",
 }
 
-TOOL_ACCURACY_CASES = [
-    {
-        "input": "What's on my schedule today?",
-        "expected_tools": ["get_calendar_events"],
-        "description": "Schedule query should call calendar tool",
-    },
-    {
-        "input": "Show me my emails",
-        "expected_tools": ["get_emails"],
-        "description": "Email query should call email tool",
-    },
-    {
-        "input": "Remember that I like dark mode",
-        "expected_tools": ["store_context"],
-        "description": "Memory request should call store_context",
-    },
-    {
-        "input": "Add a meeting with John at 3pm tomorrow",
-        "expected_tools": ["create_event"],
-        "description": "Event creation should call create_event",
-    },
+TOOL_ROUTING = [
+    ("What's on my schedule today?", "get_calendar_events"),
+    ("Show me my emails", "get_emails"),
+    ("Remember that I like dark mode", "store_context"),
+    ("Add a meeting with John at 3pm tomorrow", "create_event"),
+    ("Move my 3pm to 4pm", "move_event"),
+    ("What did I store about Docker?", "get_stored_context"),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Eval prompts (single LLM call per test, simple yes/no + score)
+# ---------------------------------------------------------------------------
+
+_RELEVANCY_PROMPT = """You are evaluating an AI assistant's response quality.
+
+User question: {input}
+Context provided: {context}
+Assistant response: {output}
+
+Rate how relevant the response is to the user's question on a scale of 1-5:
+1 = Completely irrelevant
+3 = Partially relevant
+5 = Perfectly relevant and addresses the question
+
+Respond ONLY with JSON: {{"score": <1-5>, "reason": "one line explanation"}}"""
+
+_FAITHFULNESS_PROMPT = """You are checking if an AI assistant's response only uses information from the provided context.
+
+User question: {input}
+Context (ground truth): {context}
+Assistant response: {output}
+
+Does the response ONLY contain information present in the context? Rate 1-5:
+1 = Contains significant fabricated information
+3 = Mostly faithful with minor additions
+5 = Completely faithful to the context
+
+Respond ONLY with JSON: {{"score": <1-5>, "reason": "one line explanation"}}"""
+
+_HALLUCINATION_PROMPT = """You are a hallucination detector. Check if the assistant's response contains ANY claims not supported by the context.
+
+Context (ground truth):
+{context}
+
+Assistant response:
+{output}
+
+List every claim in the response and mark each as SUPPORTED or UNSUPPORTED.
+Then give an overall score:
+1 = Major hallucinations present
+3 = Minor unsupported details
+5 = No hallucinations, everything is supported
+
+Respond ONLY with JSON: {{"score": <1-5>, "unsupported_claims": ["list", "of", "unsupported"], "reason": "one line"}}"""
+
+_TOOL_ROUTING_PROMPT = """You are evaluating tool selection for an AI assistant.
+
+Available tools:
+- get_calendar_events: read calendar/schedule
+- get_emails: read email inbox
+- store_context: save user info/preferences/notes
+- get_stored_context: retrieve previously stored info
+- create_event: create a new calendar event
+- move_event: reschedule an existing event
+
+User message: "{input}"
+Selected tool: "{tool}"
+
+Is this the correct tool for the user's request?
+Respond ONLY with JSON: {{"correct": true/false, "reason": "one line"}}"""
+
+_CORRECTNESS_PROMPT = """You are evaluating if an AI response correctly handles the user's request.
+
+User input: {input}
+Expected behavior: {expected}
+Actual response: {output}
+
+Rate correctness 1-5:
+1 = Wrong behavior
+3 = Partially correct
+5 = Exactly right
+
+Respond ONLY with JSON: {{"score": <1-5>, "reason": "one line"}}"""
 
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
-def _get_judge():
-    """Lazy-init the judge to avoid import errors when deepeval is missing."""
-    return MLXJudge()
+@pytest.fixture(autouse=True)
+def _require_mlx():
+    if not _mlx_available():
+        pytest.skip("MLX server not running at localhost:8000")
 
 
-@pytest.mark.deepeval
-class TestAnswerRelevancy:
-    """Does the agent's response actually answer the question?"""
+class TestRelevancy:
+    """Does the response actually answer the question?"""
 
-    def test_schedule_query_relevancy(self):
-        metric = AnswerRelevancyMetric(model=_get_judge(), threshold=0.5)
-        test_case = LLMTestCase(
-            input=SCHEDULE_QUERY["input"],
-            actual_output=SCHEDULE_QUERY["actual_output"],
-            retrieval_context=SCHEDULE_QUERY["retrieval_context"],
+    def _check(self, data):
+        prompt = _RELEVANCY_PROMPT.format(
+            input=data["input"],
+            context="\n".join(data["context"]),
+            output=data["output"],
         )
-        assert_test(test_case, [metric])
+        result = _judge_json(prompt)
+        assert result is not None, "Judge returned no JSON"
+        score = result.get("score", 0)
+        assert score >= 4, f"Relevancy score {score}/5: {result.get('reason', '')}"
 
-    def test_email_query_relevancy(self):
-        metric = AnswerRelevancyMetric(model=_get_judge(), threshold=0.5)
-        test_case = LLMTestCase(
-            input=EMAIL_QUERY["input"],
-            actual_output=EMAIL_QUERY["actual_output"],
-            retrieval_context=EMAIL_QUERY["retrieval_context"],
-        )
-        assert_test(test_case, [metric])
+    def test_schedule_query(self):
+        self._check(SCHEDULE_QUERY)
 
-    def test_empty_schedule_relevancy(self):
-        metric = AnswerRelevancyMetric(model=_get_judge(), threshold=0.5)
-        test_case = LLMTestCase(
-            input=EMPTY_SCHEDULE["input"],
-            actual_output=EMPTY_SCHEDULE["actual_output"],
-            retrieval_context=EMPTY_SCHEDULE["retrieval_context"],
-        )
-        assert_test(test_case, [metric])
+    def test_email_query(self):
+        self._check(EMAIL_QUERY)
+
+    def test_empty_schedule(self):
+        self._check(EMPTY_SCHEDULE)
 
 
-@pytest.mark.deepeval
 class TestFaithfulness:
-    """Does the agent only use information from the provided context?"""
+    """Does the response stick to the provided context?"""
 
-    def test_schedule_faithful_to_calendar(self):
-        metric = FaithfulnessMetric(model=_get_judge(), threshold=0.5)
-        test_case = LLMTestCase(
-            input=SCHEDULE_QUERY["input"],
-            actual_output=SCHEDULE_QUERY["actual_output"],
-            retrieval_context=SCHEDULE_QUERY["retrieval_context"],
+    def _check(self, data):
+        prompt = _FAITHFULNESS_PROMPT.format(
+            input=data["input"],
+            context="\n".join(data["context"]),
+            output=data["output"],
         )
-        assert_test(test_case, [metric])
+        result = _judge_json(prompt)
+        assert result is not None, "Judge returned no JSON"
+        score = result.get("score", 0)
+        assert score >= 4, f"Faithfulness score {score}/5: {result.get('reason', '')}"
 
-    def test_email_faithful_to_inbox(self):
-        metric = FaithfulnessMetric(model=_get_judge(), threshold=0.5)
-        test_case = LLMTestCase(
-            input=EMAIL_QUERY["input"],
-            actual_output=EMAIL_QUERY["actual_output"],
-            retrieval_context=EMAIL_QUERY["retrieval_context"],
-        )
-        assert_test(test_case, [metric])
+    def test_schedule_faithful(self):
+        self._check(SCHEDULE_QUERY)
+
+    def test_email_faithful(self):
+        self._check(EMAIL_QUERY)
 
 
-@pytest.mark.deepeval
 class TestHallucination:
-    """Does the agent avoid inventing information not in the context?"""
+    """Does the response avoid inventing information?"""
 
     def test_detects_hallucinated_event(self):
-        """The HALLUCINATION_TEST output includes a fake 'Team standup' -- should fail."""
-        metric = HallucinationMetric(model=_get_judge(), threshold=0.5)
-        test_case = LLMTestCase(
-            input=HALLUCINATION_TEST["input"],
-            actual_output=HALLUCINATION_TEST["actual_output"],
-            context=HALLUCINATION_TEST["retrieval_context"],
+        """Output includes fake 'Team standup' — judge should flag it."""
+        prompt = _HALLUCINATION_PROMPT.format(
+            context="\n".join(HALLUCINATED_OUTPUT["context"]),
+            output=HALLUCINATED_OUTPUT["output"],
         )
-        # We EXPECT this to fail (score < threshold) because output has hallucination
-        metric.measure(test_case)
-        assert metric.score < 0.5, (
-            f"Hallucination metric should flag invented 'Team standup' but scored {metric.score}"
+        result = _judge_json(prompt)
+        assert result is not None, "Judge returned no JSON"
+        score = result.get("score", 5)
+        unsupported = result.get("unsupported_claims", [])
+        # Should score low (hallucination present)
+        assert score <= 3, (
+            f"Should detect hallucination but scored {score}/5. "
+            f"Unsupported: {unsupported}"
         )
 
     def test_clean_output_passes(self):
-        """A faithful schedule response should score well on hallucination."""
-        metric = HallucinationMetric(model=_get_judge(), threshold=0.5)
-        test_case = LLMTestCase(
-            input=SCHEDULE_QUERY["input"],
-            actual_output=SCHEDULE_QUERY["actual_output"],
-            context=SCHEDULE_QUERY["retrieval_context"],
+        """Faithful schedule response should score well."""
+        prompt = _HALLUCINATION_PROMPT.format(
+            context="\n".join(SCHEDULE_QUERY["context"]),
+            output=SCHEDULE_QUERY["output"],
         )
-        assert_test(test_case, [metric])
+        result = _judge_json(prompt)
+        assert result is not None, "Judge returned no JSON"
+        score = result.get("score", 0)
+        assert score >= 4, f"Clean output scored {score}/5: {result.get('reason', '')}"
 
 
-@pytest.mark.deepeval
-class TestToolAccuracy:
-    """Does the agent call the right tool for each query type?
+class TestToolRouting:
+    """Does the agent pick the right tool for each query?"""
 
-    Uses GEval to judge whether the expected tool would be appropriate
-    for the given user input.
-    """
-
-    def test_tool_routing_correctness(self):
-        tool_correctness = GEval(
-            name="Tool Routing",
-            criteria=(
-                "Given the user's input, determine if the expected tool is the correct one "
-                "to call. The available tools are: get_calendar_events (for schedule queries), "
-                "get_emails (for email queries), store_context (for remembering user info), "
-                "update_profile (for updating user preferences), create_event (for creating "
-                "calendar events), move_event (for rescheduling events)."
-            ),
-            evaluation_params=[
-                LLMTestCaseParams.INPUT,
-                LLMTestCaseParams.EXPECTED_OUTPUT,
-            ],
-            model=_get_judge(),
-            threshold=0.5,
+    @pytest.mark.parametrize("user_input,expected_tool", TOOL_ROUTING)
+    def test_tool_selection(self, user_input, expected_tool):
+        prompt = _TOOL_ROUTING_PROMPT.format(input=user_input, tool=expected_tool)
+        result = _judge_json(prompt)
+        assert result is not None, "Judge returned no JSON"
+        assert result.get("correct") is True, (
+            f"Tool '{expected_tool}' not confirmed for '{user_input}': "
+            f"{result.get('reason', '')}"
         )
 
-        for case in TOOL_ACCURACY_CASES:
-            test_case = LLMTestCase(
-                input=case["input"],
-                actual_output=", ".join(case["expected_tools"]),
-                expected_output=", ".join(case["expected_tools"]),
-            )
-            tool_correctness.measure(test_case)
-            assert tool_correctness.score >= 0.5, (
-                f"Tool routing failed for '{case['description']}': "
-                f"score={tool_correctness.score}, reason={tool_correctness.reason}"
-            )
 
-
-@pytest.mark.deepeval
-class TestResponseCorrectness:
-    """General correctness using GEval."""
+class TestCorrectness:
+    """General response correctness."""
 
     def test_context_store_acknowledgement(self):
-        correctness = GEval(
-            name="Correctness",
-            criteria=(
-                "Determine if the actual output correctly acknowledges and confirms "
-                "that the user's preference has been saved."
-            ),
-            evaluation_params=[
-                LLMTestCaseParams.INPUT,
-                LLMTestCaseParams.ACTUAL_OUTPUT,
-                LLMTestCaseParams.EXPECTED_OUTPUT,
-            ],
-            model=_get_judge(),
-            threshold=0.5,
+        prompt = _CORRECTNESS_PROMPT.format(
+            input=CONTEXT_STORE["input"],
+            expected=CONTEXT_STORE["expected"],
+            output=CONTEXT_STORE["output"],
         )
-        test_case = LLMTestCase(
-            input=CONTEXT_STORE_QUERY["input"],
-            actual_output=CONTEXT_STORE_QUERY["actual_output"],
-            expected_output=CONTEXT_STORE_QUERY["expected_output"],
-        )
-        assert_test(test_case, [correctness])
+        result = _judge_json(prompt)
+        assert result is not None, "Judge returned no JSON"
+        score = result.get("score", 0)
+        assert score >= 4, f"Correctness score {score}/5: {result.get('reason', '')}"

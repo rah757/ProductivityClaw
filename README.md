@@ -37,11 +37,12 @@ No Google API keys, no OAuth dance, works offline. Direct access to macOS Calend
 ### Why Telegram
 Free, instant setup, runs on your phone. Rich inline buttons enable the human-in-the-loop confirmation workflow for write actions. No web UI to build or maintain.
 
-## Current Status — Phase 1: Prove the Loop
+## Current Status — Phase 2: Memory, Tool Calling + Write Actions
 
 - [x] Project architecture and technical design
 - [x] MLX inference backend (migrated from Ollama)
 - [x] Telegram bot — messages, HTML rendering, feedback buttons
+- [x] Telegram streaming — tiered message editing for live LLM output
 - [x] Apple Calendar read-only integration (EventKit)
 - [x] Calendar write actions with confirmation (create_event, move_event)
 - [x] Context dump ingestion (store_context + FTS5 search)
@@ -49,9 +50,12 @@ Free, instant setup, runs on your phone. Rich inline buttons enable the human-in
 - [x] Conversation logging with trace_id linking
 - [x] Thumbs up/down feedback on every response
 - [x] Heartbeat — proactive briefing system (morning/evening/meeting reminders)
-- [ ] DeepEval test suite (tool call accuracy, response factuality, latency)
+- [x] Email ingestion — Apple Mail via ScriptingBridge + LLM classification (HIGH/LOW/NOISE)
+- [x] Apple Notes ingestion — ScriptingBridge, 60-day window, auto-sync in heartbeat
+- [x] LLM priority lock — chat always wins over background tasks (MLX single-threaded)
+- [x] Custom LLM-as-judge eval suite (see Eval below)
 
-**Phase 1 target:** Use it every morning for a week. The briefing is accurate, the calendar answers are correct, and there's eval data proving it.
+**Phase 2 target:** Calendar writes with confirmation, email/notes awareness, streaming responses, and eval data proving quality.
 
 ## Tech Stack
 
@@ -65,7 +69,8 @@ Free, instant setup, runs on your phone. Rich inline buttons enable the human-in
 | Memory | SQLite + FTS5 | Local-first, BM25 search, zero config |
 | Calendar | Apple EventKit (PyObjC) | Native macOS, no API keys, works offline |
 | Email | Apple Mail (ScriptingBridge) | Same native pattern as EventKit, zero credentials |
-| Eval | DeepEval | (planned) |
+| Notes | Apple Notes (ScriptingBridge) | Same native pattern, auto-syncs every heartbeat |
+| Eval | Custom LLM-as-judge | Local Qwen judges its own outputs (no cloud eval APIs) |
 
 ## Skills
 
@@ -76,15 +81,32 @@ Free, instant setup, runs on your phone. Rich inline buttons enable the human-in
 | `move_event` | Write | Propose rescheduling an event — requires user confirmation |
 | `store_context` | Write | Save notes, tasks, reminders to persistent memory with FTS5 indexing |
 | `update_profile` | Write | Manage living user profile (preferences, schedule, routines, work) |
+| `get_emails` | Read | Fetch classified emails by timeframe and priority filter |
 
 Write skills that modify external systems (calendar) use a **pending action workflow**: the LLM proposes the action, the user sees a confirmation button in Telegram, and only an explicit tap executes the write.
+
+## Eval
+
+We tried DeepEval but it requires multiple chained LLM calls per metric, and Qwen 3.5 (MoE) intermittently returns empty responses — breaking DeepEval's JSON parsing pipeline. Instead we wrote a **custom LLM-as-judge eval** that:
+
+- Sends **one prompt per test** (not 3+) with a simple "rate 1-5, respond with JSON" format
+- **Retries with escalating temperature** (0.0 → 0.1 → 0.3 → 0.5 → 0.7) to break out of empty-response loops
+- Strips `<think>` tags and extracts JSON from reasoning fields
+- Marks tests as `flaky(reruns=2)` since local LLM non-determinism is inherent
+
+**Test suite:**
+
+| Suite | Tests | Requires MLX | What it covers |
+|-------|-------|--------------|----------------|
+| Deterministic | 32 | No | Calendar filtering, prompt assembly, email parsing, pending actions, tool detection |
+| LLM-as-judge | 14 | Yes | Answer relevancy, faithfulness, hallucination detection, tool routing, correctness |
 
 ## Roadmap
 
 | Phase | Focus | Status |
 |-------|-------|--------|
-| **1 — Prove the Loop** | Telegram + Calendar + Memory + Heartbeat + Eval | Nearly complete |
-| 2 — Intelligence | Epoch reasoning loop, email ingestion, MCP integrations, memory organization | Planned |
+| **1 — Prove the Loop** | Telegram + Calendar + Memory + Heartbeat + Eval | Complete |
+| **2 — Memory + Write Actions** | Email/Notes ingestion, streaming, priority lock, calendar writes, eval | In progress |
 | 3 — Proactive | Proactive suggestions, pattern recognition, smart reminders | Planned |
 | 4 — Polish | Siri Shortcuts, vision, multi-modal, eval dashboard | Future |
 | 5 — Ecosystem | Skill import pipeline, multi-agent, OSS community | Future |
