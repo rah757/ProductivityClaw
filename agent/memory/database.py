@@ -81,6 +81,43 @@ def init_db():
             context_dump_id INTEGER,
             processed_at    DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+
+        -- Durable extracted facts (subject + key + value model)
+        CREATE TABLE IF NOT EXISTS facts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fact_type TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            confidence REAL DEFAULT 0.7,
+            trace_id TEXT,
+            source_conversation_id INTEGER,
+            valid_from TEXT,
+            valid_to TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_confirmed DATETIME DEFAULT CURRENT_TIMESTAMP,
+            times_confirmed INTEGER DEFAULT 1,
+            is_active INTEGER DEFAULT 1,
+            FOREIGN KEY (source_conversation_id) REFERENCES conversations(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_facts_subject_key ON facts(subject, key);
+        CREATE INDEX IF NOT EXISTS idx_facts_active ON facts(is_active);
+
+        -- Proposed facts awaiting review or auto-promotion rules
+        CREATE TABLE IF NOT EXISTS facts_staging (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trace_id TEXT NOT NULL,
+            fact_type TEXT NOT NULL,
+            subject TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            confidence REAL DEFAULT 0.7,
+            evidence TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            resolved_at DATETIME
+        );
+        CREATE INDEX IF NOT EXISTS idx_facts_staging_status ON facts_staging(status);
     """)
     db.commit()
 
