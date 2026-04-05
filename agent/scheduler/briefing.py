@@ -14,6 +14,7 @@ from agent.core.prompts import get_system_prompt
 from agent.integrations.apple_calendar import fetch_all_events, full_sync
 from agent.integrations.apple_mail import get_unprocessed_emails, classify_emails
 from agent.integrations.apple_notes import ingest_notes
+from agent.memory.facts import pending_staging
 from agent.memory.context_store import get_recent_dumps, store_context_dump
 from agent.memory.database import db
 
@@ -99,6 +100,16 @@ def _build_heartbeat_context() -> str:
             parts.append("HIGH-priority emails needing attention:")
             for e in high_emails:
                 parts.append(f"  - {e[0]} (from: {e[1]})")
+    except Exception:
+        pass
+
+    # Pending fact proposals from extraction pipeline
+    try:
+        staged = pending_staging(limit=5)
+        if staged:
+            parts.append("Pending fact proposals (ask user to confirm/deny):")
+            for s in staged:
+                parts.append(f"  - [{s['fact_type']}] {s['subject']}.{s['key']} = {s['value']} (conf: {s['confidence']:.1f})")
     except Exception:
         pass
 

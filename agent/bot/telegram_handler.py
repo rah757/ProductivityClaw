@@ -9,6 +9,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from agent.config import ALLOWED_USERS, MLX_MODEL
+from agent.memory.extraction import extract_facts_background
 
 
 def _md_to_tg_html(text: str) -> str:
@@ -137,6 +138,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "latency_ms": latency_ms,
         "model": MLX_MODEL,
     })
+
+    # Fire fact extraction in background (3s delay, respects priority lock)
+    extract_facts_background(user_message, response_text, trace_id=trace_id)
 
     # Handle pending actions (tool calls that need confirmation)
     if pending_action_id:

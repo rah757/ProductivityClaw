@@ -47,7 +47,9 @@ def _read_md(filename: str) -> str:
 
 
 def get_system_prompt():
-    """Assemble the full system prompt from SOUL.md + rules + CONTEXT.md."""
+    """Assemble the full system prompt from SOUL.md + rules + CONTEXT.md + extracted facts."""
+    from agent.memory.facts import format_facts_for_prompt
+
     soul = _read_md("SOUL.md")
     context = _read_md("CONTEXT.md")
 
@@ -57,6 +59,10 @@ def get_system_prompt():
     parts.append(RULES_PROMPT)
     if context:
         parts.append(f"--- LIVING USER PROFILE ---\n{context}\n---------------------------")
+
+    facts_block = format_facts_for_prompt(limit=40, min_confidence=0.5)
+    if facts_block:
+        parts.append(facts_block)
 
     return "\n\n".join(parts)
 
