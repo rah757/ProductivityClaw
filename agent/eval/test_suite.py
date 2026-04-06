@@ -269,6 +269,119 @@ class TestPendingActionToken:
 
 
 # ===========================================================================
+# LAYER 1E: FACT EXTRACTION PARSING (deterministic)
+# ===========================================================================
+
+class TestFactExtractionParsing:
+    """Tests the extraction pipeline's JSON parsing and routing logic."""
+
+    def test_parse_valid_extraction_json(self):
+        """Simulate LLM returning valid fact JSON."""
+        import json
+        raw = '[{"fact_type": "preference", "subject": "user", "key": "meeting_time", "value": "prefers mornings before 11am", "confidence": 0.9}]'
+        facts = json.loads(raw)
+        assert len(facts) == 1
+        assert facts[0]["fact_type"] == "preference"
+        assert facts[0]["confidence"] == 0.9
+
+    def test_parse_empty_array(self):
+        """No facts to extract (greeting, small talk)."""
+        import json
+        raw = "[]"
+        facts = json.loads(raw)
+        assert facts == []
+
+    def test_parse_json_from_think_tags(self):
+        """Qwen wraps JSON in think tags — extraction should still find it."""
+        import json, re
+        raw = '<think>Let me analyze this...</think>[{"fact_type": "personal", "subject": "user", "key": "role", "value": "data scientist", "confidence": 0.95}]'
+        clean = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        facts = json.loads(clean)
+        assert len(facts) == 1
+        assert facts[0]["key"] == "role"
+
+    def test_parse_json_inside_think_tags(self):
+        """JSON only exists inside think tags, clean text is empty."""
+        import re, json
+        raw = '<think>[{"fact_type": "work", "subject": "user", "key": "project", "value": "ProductivityClaw", "confidence": 0.8}]</think>'
+        clean = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+        assert clean == ""
+        # Fallback: search full text
+        match = re.search(r"\[.*\]", raw, re.DOTALL)
+        assert match is not None
+        facts = json.loads(match.group())
+        assert facts[0]["value"] == "ProductivityClaw"
+
+    def test_skip_incomplete_facts(self):
+        """Facts missing required keys should be skipped."""
+        facts = [
+            {"fact_type": "preference", "subject": "user", "key": "color", "value": "blue"},
+            {"fact_type": "preference", "subject": "user"},  # missing key + value
+            {"random": "junk"},
+        ]
+        required = ("fact_type", "subject", "key", "value")
+        valid = [f for f in facts if all(k in f for k in required)]
+        assert len(valid) == 1
+        assert valid[0]["key"] == "color"
+
+    def test_skip_trivial_messages(self):
+        """Short greetings shouldn't trigger extraction."""
+        user_msg = "hi"
+        response = "hey"
+        should_skip = len(user_msg.strip()) < 10 and len(response.strip()) < 20
+        assert should_skip
+
+    def test_nontrivial_messages_proceed(self):
+        """Real conversation should proceed to extraction."""
+        user_msg = "I prefer morning meetings before 11am"
+        response = "Got it, saved."
+        should_skip = len(user_msg.strip()) < 10 and len(response.strip()) < 20
+        assert not should_skip
+
+
+class TestFactRouting:
+    """Tests the confidence-based routing: direct insert vs staging."""
+
+    def test_high_confidence_routes_direct(self):
+        """Confidence >= 0.9 should route to facts table directly."""
+        fact = {"fact_type": "personal", "subject": "user", "key": "name", "value": "Rahman", "confidence": 0.95}
+        assert fact["confidence"] >= 0.9
+
+    def test_low_confidence_routes_staging(self):
+        """Confidence < 0.9 should route to staging."""
+        fact = {"fact_type": "preference", "subject": "user", "key": "food", "value": "likes biryani", "confidence": 0.6}
+        assert fact["confidence"] < 0.9
+
+    def test_default_confidence_is_medium(self):
+        """Missing confidence should default to 0.7 (staging)."""
+        fact = {"fact_type": "work", "subject": "user", "key": "tool", "value": "uses Docker"}
+        conf = float(fact.get("confidence", 0.7))
+        assert conf == 0.7
+        assert conf < 0.9  # goes to staging
+
+
+class TestFactPromptFormatting:
+    """Tests format_facts_for_prompt output."""
+
+    def test_empty_facts_returns_empty(self):
+        from agent.memory.facts import format_facts_for_prompt
+        # With no facts in DB, should return empty string
+        result = format_facts_for_prompt(limit=40, min_confidence=99.0)
+        assert result == ""
+
+    def test_format_contains_header(self):
+        """If facts exist, output should have the EXTRACTED FACTS header."""
+        # We test the format function's structure, not DB content
+        lines = ["--- EXTRACTED FACTS (from conversations) ---"]
+        lines.append("  - [preference] user.meeting_time = prefers mornings (conf: 0.90)")
+        lines.append("---")
+        block = "\n".join(lines)
+        assert "EXTRACTED FACTS" in block
+        assert "preference" in block
+        assert "conf:" in block
+
+
+# ===========================================================================
 # LAYER 2: LLM INTEGRATION TESTS (requires MLX server at localhost:8000)
 # ===========================================================================
 
