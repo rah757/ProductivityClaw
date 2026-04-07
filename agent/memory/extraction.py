@@ -58,13 +58,17 @@ def extract_facts(
     if len(user_message.strip()) < 10 and len(response.strip()) < 20:
         return []
 
+    import httpx
     llm = ChatOpenAI(
         base_url=MLX_BASE_URL,
         api_key="not-needed",
         model=MLX_MODEL,
         temperature=0.0,
         max_tokens=2000,
+        timeout=120,
+        http_client=httpx.Client(timeout=120),
     )
+    print(f"  [extraction] calling LLM...", flush=True)
 
     conversation = f"User: {user_message}\nAssistant: {response}"
 
@@ -74,6 +78,7 @@ def extract_facts(
             HumanMessage(content=conversation),
         ])
 
+        print(f"  [extraction] LLM responded (content len={len(str(resp.content or ''))})", flush=True)
         text = resp.content or ""
         if isinstance(text, list):
             text = "".join(
@@ -101,7 +106,7 @@ def extract_facts(
             return []
 
     except Exception as e:
-        print(f"  [extraction] failed: {e}")
+        print(f"  [extraction] failed: {e}", flush=True)
         return []
 
     tid = trace_id or "extract"
@@ -127,7 +132,7 @@ def extract_facts(
                 confidence=conf,
                 trace_id=tid,
             )
-            print(f"  [extraction] direct: {subject}.{key} = {value} (conf={conf})")
+            print(f"  [extraction] direct: {subject}.{key} = {value} (conf={conf})", flush=True)
         else:
             # Lower confidence — stage for review
             insert_staging(
@@ -139,12 +144,12 @@ def extract_facts(
                 confidence=conf,
                 evidence=f"From: {user_message[:100]}",
             )
-            print(f"  [extraction] staged: {subject}.{key} = {value} (conf={conf})")
+            print(f"  [extraction] staged: {subject}.{key} = {value} (conf={conf})", flush=True)
 
         results.append(fact)
 
     if results:
-        print(f"  [extraction] extracted {len(results)} facts")
+        print(f"  [extraction] extracted {len(results)} facts", flush=True)
     return results
 
 
@@ -158,13 +163,25 @@ def extract_facts_background(
     The delay avoids blocking MLX if the user sends another message immediately."""
     from agent.scheduler.briefing import is_user_active
 
+    _trigger_ts = time.time()
+    print(f"  [extraction] scheduling background extraction (delay={delay}s, msg={user_message[:40]}...)", flush=True)
+
     def _run():
-        time.sleep(delay)
-        # Check priority lock — skip if user is actively chatting
-        if is_user_active():
-            print("  [extraction] deferred — user active")
-            return
-        extract_facts(user_message, response, trace_id)
+        try:
+            time.sleep(delay)
+            print(f"  [extraction] woke up, checking activity...", flush=True)
+            # Only skip if user sent ANOTHER message after this extraction was triggered
+            import agent.scheduler.briefing as _briefing_mod
+            last_ts = _briefing_mod._last_user_message_ts
+            if last_ts > _trigger_ts + 1:
+                print(f"  [extraction] deferred — user sent another message (last={last_ts:.1f} trigger={_trigger_ts:.1f})", flush=True)
+                return
+            print(f"  [extraction] proceeding with extraction...", flush=True)
+            extract_facts(user_message, response, trace_id)
+        except Exception as e:
+            import traceback
+            print(f"  [extraction] background thread error: {e}", flush=True)
+            traceback.print_exc()
 
     t = threading.Thread(target=_run, daemon=True)
     t.start()

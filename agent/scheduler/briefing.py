@@ -179,9 +179,9 @@ def _heartbeat_tick():
 
     # ── Send immediate HIGH email alerts ─────────────────────────
     if high_alerts and _send_message_fn:
-        lines = ["📧 <b>Emails needing attention:</b>"]
+        lines = ["📧 **Emails needing attention:**"]
         for e in high_alerts:
-            lines.append(f"• {e['summary']} <i>(from: {e['sender']})</i>")
+            lines.append(f"• {e['summary']} *(from: {e['sender']})*")
         alert_text = "\n".join(lines)
         try:
             loop = asyncio.new_event_loop()

@@ -140,7 +140,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
 
     # Fire fact extraction in background (3s delay, respects priority lock)
-    extract_facts_background(user_message, response_text, trace_id=trace_id)
+    extract_facts_background(user_text, response_text, trace_id=trace_id)
 
     # Handle pending actions (tool calls that need confirmation)
     if pending_action_id:
