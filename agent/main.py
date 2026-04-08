@@ -1,4 +1,5 @@
 import time
+import asyncio
 import threading
 from datetime import datetime, timedelta
 
@@ -63,17 +64,25 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_write_confirm, pattern=r"^writeconfirm:"))
     app.add_handler(CallbackQueryHandler(handle_noop, pattern=r"^noop$"))
 
-    # Start heartbeat — proactive agent that wakes up and messages user if needed
-    async def _heartbeat_send(text: str):
-        """Send a heartbeat message to the first allowed user."""
-        bot = app.bot
-        html_text = _md_to_tg_html(f"🫀 {text}")
-        for user_id in ALLOWED_USERS:
-            await bot.send_message(chat_id=user_id, text=html_text, parse_mode="HTML")
-            break  # just send to the first allowed user
+    # Start heartbeat inside post_init so we have the running event loop
+    async def _post_init(application):
+        loop = asyncio.get_running_loop()
 
-    set_send_fn(_heartbeat_send)
-    start_heartbeat()
+        async def _send(text: str):
+            bot = application.bot
+            html_text = _md_to_tg_html(f"🫀 {text}")
+            for user_id in ALLOWED_USERS:
+                await bot.send_message(chat_id=user_id, text=html_text, parse_mode="HTML")
+                break
+
+        def _sync_send(text: str):
+            future = asyncio.run_coroutine_threadsafe(_send(text), loop)
+            future.result(timeout=15)
+
+        set_send_fn(_sync_send)
+        start_heartbeat()
+
+    app.post_init = _post_init
 
     print("Bot is running. Send a message on Telegram.")
     print("  (If you see 'Conflict: terminated by other getUpdates', stop any other bot instance—only one can poll at a time.)")

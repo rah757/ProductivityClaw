@@ -14,6 +14,15 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from agent.config import MLX_MODEL, MLX_BASE_URL
+
+# Messages too short/trivial to contain extractable facts
+_TRIVIAL_RE = re.compile(
+    r"^(ok|okay|hi|hey|hello|thanks|thank you|yes|no|sure|cool|nice|"
+    r"got it|sounds good|i see|hm+|ah+|oh+|yep|nope|bye|lol|haha|"
+    r"done|k|yea|yeah|nah|alright|fine|good|great|awesome|perfect|"
+    r"i finished that|whats up|sup|yo)\s*[.!?]*$",
+    re.IGNORECASE,
+)
 from agent.memory.facts import insert_staging, insert_fact, promote_staging
 
 _EXTRACT_SYSTEM = """You extract factual information from conversations.
@@ -161,6 +170,8 @@ def extract_facts_background(
 ) -> None:
     """Fire fact extraction in a background thread with a short delay.
     The delay avoids blocking MLX if the user sends another message immediately."""
+    if _TRIVIAL_RE.match(user_message.strip()):
+        return  # skip trivial messages, don't waste MLX
     from agent.scheduler.briefing import is_user_active
 
     _trigger_ts = time.time()

@@ -119,7 +119,6 @@ def _build_heartbeat_context() -> str:
 def _heartbeat_tick():
     """One heartbeat cycle: build context, ask LLM, send if needed."""
     import re
-    import asyncio
 
     heartbeat_md = _read_heartbeat_md()
     if not heartbeat_md:
@@ -184,9 +183,7 @@ def _heartbeat_tick():
             lines.append(f"• {e['summary']} *(from: {e['sender']})*")
         alert_text = "\n".join(lines)
         try:
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(_send_message_fn(alert_text))
-            loop.close()
+            _send_message_fn(alert_text)
         except Exception as e:
             print(f"  [heartbeat] email alert send error: {e}")
 
@@ -224,10 +221,7 @@ def _heartbeat_tick():
 
         if _send_message_fn:
             print(f"  [heartbeat] {datetime.now().strftime('%H:%M')} — sending: {text[:60]}...")
-            # Run the async send function from sync context
-            loop = asyncio.new_event_loop()
-            loop.run_until_complete(_send_message_fn(text))
-            loop.close()
+            _send_message_fn(text)
         else:
             print(f"  [heartbeat] {datetime.now().strftime('%H:%M')} — no send_fn registered, skipping")
 
