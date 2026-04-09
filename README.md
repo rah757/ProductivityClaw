@@ -23,7 +23,7 @@ All data stays on your device. Calendar events, personal notes, habits, routines
 MLX uses ~50% less RAM than Ollama on Apple Silicon. The main reason: Qwen's 150K+ token vocabulary creates a 3-4GB embedding table in FP16. Ollama keeps this full-precision; MLX quantizes it down to ~1GB. MLX also exploits Apple Silicon's Unified Memory Architecture (no CPU↔GPU staging buffers) and uses custom Metal shaders. The codebase connects via OpenAI-compatible API (`ChatOpenAI`), so switching to Ollama for non-Mac deployment is a config change — same endpoint format.
 
 ### Why Qwen 3.5 35B-A3B
-Mixture-of-Experts model: 35B total parameters, but only ~3B active per token (256 experts, 8 active). This gives you large-model quality at small-model speed — 2-4 second responses on a MacBook Pro. `think=False` works correctly (was broken on Qwen 3), keeping latency tight for chat while still available for background reasoning tasks.
+Mixture-of-Experts model: 35B total parameters, but only ~3B active per token (256 experts, 8 active). This gives you large-model quality at small-model speed — 4-6 second responses on a MacBook Pro. `think=False` works correctly (was broken on Qwen 3), keeping latency tight for chat while still available for background reasoning tasks.
 
 ### Why LangGraph
 Not a simple prompt→response chain. LangGraph provides a stateful agent loop: the LLM can call tools, inspect results, call more tools, and maintain state across the cycle. Pending action state (for write confirmations) lives in the graph, not in fragile string parsing.
@@ -35,7 +35,7 @@ Local-first, zero config, single file. FTS5 gives BM25-ranked full-text search o
 No Google API keys, no OAuth dance, works offline. Direct access to macOS Calendar via PyObjC. Read-only by default — write actions (create/move events) require explicit user confirmation through Telegram buttons.
 
 ### Why Telegram
-Free, instant setup, runs on your phone. Rich inline buttons enable the human-in-the-loop confirmation workflow for write actions. No web UI to build or maintain.
+Free, instant setup, runs on your phone. Rich inline buttons enable the human-in-the-loop confirmation workflow for write actions. No web UI to build or maintain. Whatsapp API hard to attain"
 
 ## Current Status — Phase 2: Memory, Tool Calling + Write Actions
 
