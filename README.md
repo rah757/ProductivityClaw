@@ -54,8 +54,10 @@ Free, instant setup, runs on your phone. Rich inline buttons enable the human-in
 - [x] Apple Notes ingestion — ScriptingBridge, 60-day window, auto-sync in heartbeat
 - [x] LLM priority lock — chat always wins over background tasks (MLX single-threaded)
 - [x] Custom LLM-as-judge eval suite (see Eval below)
+- [x] Fact extraction pipeline — auto-extracts preferences/personal info from chat, routes by confidence to facts or staging
+- [x] Event loop fix — heartbeat sends via `run_coroutine_threadsafe` on main loop (no more connection pool corruption)
 
-**Phase 2 target:** Calendar writes with confirmation, email/notes awareness, streaming responses, and eval data proving quality.
+**Phase 2 target:** Calendar writes with confirmation, email/notes awareness, streaming responses, fact extraction, and eval data proving quality.
 
 ## Tech Stack
 
@@ -98,7 +100,7 @@ We tried DeepEval but it requires multiple chained LLM calls per metric, and Qwe
 
 | Suite | Tests | Requires MLX | What it covers |
 |-------|-------|--------------|----------------|
-| Deterministic | 32 | No | Calendar filtering, prompt assembly, email parsing, pending actions, tool detection |
+| Deterministic | 47 | No | Calendar filtering, prompt assembly, email parsing, pending actions, tool detection, fact extraction parsing/routing |
 | LLM-as-judge | 14 | Yes | Answer relevancy, faithfulness, hallucination detection, tool routing, correctness |
 
 ## Roadmap

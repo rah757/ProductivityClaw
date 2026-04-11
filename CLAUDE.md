@@ -47,7 +47,7 @@ All env vars loaded in `agent/config.py` from `.env`:
 ## Testing
 
 ```bash
-# Deterministic (no LLM needed) — should always be 32 pass
+# Deterministic (no LLM needed) — should always be 47 pass
 pytest agent/eval/test_suite.py agent/eval/test_write_tools.py -m "not llm and not deepeval" -v
 
 # LLM-as-judge (needs MLX server at localhost:8000)
