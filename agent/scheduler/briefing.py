@@ -103,6 +103,22 @@ def _build_heartbeat_context() -> str:
     except Exception:
         pass
 
+    # Recent notes (last 5 days)
+    try:
+        recent_notes = db.execute(
+            "SELECT content, created_at FROM context_dumps "
+            "WHERE source = 'notes' AND created_at > datetime('now', '-5 days') "
+            "ORDER BY created_at DESC LIMIT 5"
+        ).fetchall()
+        if recent_notes:
+            parts.append("Recent Apple Notes (last 5 days):")
+            for n in recent_notes:
+                # Truncate long notes for context window
+                preview = n[0][:200].replace("\n", " ")
+                parts.append(f"  - {preview} ({n[1]})")
+    except Exception:
+        pass
+
     # Pending fact proposals from extraction pipeline
     try:
         staged = pending_staging(limit=5)

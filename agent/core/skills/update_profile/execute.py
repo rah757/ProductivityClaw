@@ -11,14 +11,13 @@ import os
 _CONTEXT_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "CONTEXT.md")
 
 # Valid sections — must match CONTEXT.md headings
-_VALID_SECTIONS = {"Preferences", "Schedule", "Routines", "Work"}
+_VALID_SECTIONS = {"Preferences", "Schedule", "Routines", "Work", "Personal", "Education", "Health", "Goals"}
 
 # Map common LLM hallucinated sections to valid ones
 _SECTION_ALIASES = {
-    "health": "Routines",
-    "fitness": "Routines",
-    "gym": "Routines",
-    "exercise": "Routines",
+    "fitness": "Health",
+    "gym": "Health",
+    "exercise": "Health",
     "habits": "Routines",
     "meetings": "Schedule",
     "standup": "Schedule",
@@ -26,8 +25,22 @@ _SECTION_ALIASES = {
     "recurring": "Schedule",
     "job": "Work",
     "team": "Work",
+    "projects": "Work",
     "settings": "Preferences",
     "defaults": "Preferences",
+    "school": "Education",
+    "university": "Education",
+    "classes": "Education",
+    "courses": "Education",
+    "bio": "Personal",
+    "about": "Personal",
+    "info": "Personal",
+    "family": "Personal",
+    "relationships": "Personal",
+    "pets": "Personal",
+    "targets": "Goals",
+    "objectives": "Goals",
+    "plans": "Goals",
 }
 
 
